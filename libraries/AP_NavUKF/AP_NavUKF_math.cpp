@@ -226,6 +226,150 @@ void unscented_covariance(const ftype chi[NUM_SIGMA][NUM_STATES], const ftype xb
     }
 }
 
+bool unscented_update(ftype x[NUM_STATES], ftype P[NUM_ERR][NUM_ERR], const Weights &w,
+                      const ftype chi[NUM_SIGMA][NUM_STATES], const ftype Z[NUM_SIGMA][MAX_MEAS],
+                      uint8_t m, const ftype z[MAX_MEAS], const ftype R[MAX_MEAS], uint8_t angle_mask,
+                      UpdateResult &res)
+{
+    if (m == 0 || m > MAX_MEAS) {
+        return false;
+    }
+
+    // predicted measurement: weighted mean, circular for angles
+    ftype zbar[MAX_MEAS] {};
+    for (uint8_t j = 0; j < m; j++) {
+        if (angle_mask & (1U << j)) {
+            ftype s = 0, c = 0;
+            for (uint8_t i = 0; i < NUM_SIGMA; i++) {
+                const ftype wi = (i == 0) ? w.wm0 : w.wi;
+                s += wi * sinF(Z[i][j]);
+                c += wi * cosF(Z[i][j]);
+            }
+            zbar[j] = atan2F(s, c);
+        } else {
+            ftype s = 0;
+            for (uint8_t i = 0; i < NUM_SIGMA; i++) {
+                s += ((i == 0) ? w.wm0 : w.wi) * Z[i][j];
+            }
+            zbar[j] = s;
+        }
+    }
+
+    // innovation covariance S and cross covariance Pxz
+    ftype S[MAX_MEAS][MAX_MEAS] {};
+    ftype Pxz[NUM_ERR][MAX_MEAS] {};
+    ftype dx[NUM_ERR];
+    ftype dz[MAX_MEAS];
+    for (uint8_t i = 0; i < NUM_SIGMA; i++) {
+        const ftype wc = (i == 0) ? w.wc0 : w.wi;
+        for (uint8_t j = 0; j < m; j++) {
+            dz[j] = Z[i][j] - zbar[j];
+            if (angle_mask & (1U << j)) {
+                dz[j] = wrap_PI(dz[j]);
+            }
+        }
+        state_minus(chi[i], x, dx);
+        for (uint8_t a = 0; a < m; a++) {
+            for (uint8_t b = 0; b < m; b++) {
+                S[a][b] += wc * dz[a] * dz[b];
+            }
+        }
+        for (uint8_t r = 0; r < NUM_ERR; r++) {
+            for (uint8_t b = 0; b < m; b++) {
+                Pxz[r][b] += wc * dx[r] * dz[b];
+            }
+        }
+    }
+    for (uint8_t j = 0; j < m; j++) {
+        S[j][j] += R[j];
+    }
+
+    // S^-1 through the Cholesky factor: Sinv = L^-T L^-1
+    ftype Ls[MAX_MEAS * MAX_MEAS], Sv[MAX_MEAS * MAX_MEAS];
+    for (uint8_t a = 0; a < m; a++) {
+        for (uint8_t b = 0; b < m; b++) {
+            Sv[a * m + b] = S[a][b];
+        }
+    }
+    symmetrize(Sv, m);
+    if (!cholesky(Sv, Ls, m)) {
+        return false;
+    }
+    ftype Linv[MAX_MEAS][MAX_MEAS] {};
+    for (uint8_t c = 0; c < m; c++) {
+        // forward substitution for column c of L^-1
+        for (uint8_t r = 0; r < m; r++) {
+            ftype s = (r == c) ? 1 : 0;
+            for (uint8_t k = 0; k < r; k++) {
+                s -= Ls[r * m + k] * Linv[k][c];
+            }
+            Linv[r][c] = s / Ls[r * m + r];
+        }
+    }
+    ftype Sinv[MAX_MEAS][MAX_MEAS] {};
+    for (uint8_t a = 0; a < m; a++) {
+        for (uint8_t b = 0; b < m; b++) {
+            ftype s = 0;
+            for (uint8_t k = 0; k < m; k++) {
+                s += Linv[k][a] * Linv[k][b];
+            }
+            Sinv[a][b] = s;
+        }
+    }
+
+    // innovation and NIS
+    res.m = m;
+    res.nis = 0;
+    for (uint8_t j = 0; j < m; j++) {
+        ftype nu = z[j] - zbar[j];
+        if (angle_mask & (1U << j)) {
+            nu = wrap_PI(nu);
+        }
+        res.innov[j] = nu;
+        res.innov_sd[j] = sqrtF(S[j][j]);
+    }
+    for (uint8_t a = 0; a < m; a++) {
+        for (uint8_t b = 0; b < m; b++) {
+            res.nis += res.innov[a] * Sinv[a][b] * res.innov[b];
+        }
+    }
+
+    // gain K = Pxz S^-1, state correction K nu
+    ftype K[NUM_ERR][MAX_MEAS];
+    ftype corr[NUM_ERR];
+    for (uint8_t r = 0; r < NUM_ERR; r++) {
+        corr[r] = 0;
+        for (uint8_t b = 0; b < m; b++) {
+            ftype s = 0;
+            for (uint8_t k = 0; k < m; k++) {
+                s += Pxz[r][k] * Sinv[k][b];
+            }
+            K[r][b] = s;
+            corr[r] += s * res.innov[b];
+        }
+    }
+    ftype xnew[NUM_STATES];
+    state_plus(x, corr, xnew);
+    memcpy(x, xnew, sizeof(xnew));
+
+    // P <- P - K Pxz^T  (= P - K S K^T), then exactly symmetric
+    for (uint8_t r = 0; r < NUM_ERR; r++) {
+        for (uint8_t c = r; c < NUM_ERR; c++) {
+            ftype s = 0;
+            for (uint8_t k = 0; k < m; k++) {
+                s += K[r][k] * Pxz[c][k];
+            }
+            P[r][c] -= s;
+        }
+    }
+    for (uint8_t r = 0; r < NUM_ERR; r++) {
+        for (uint8_t c = 0; c < r; c++) {
+            P[r][c] = P[c][r];
+        }
+    }
+    return true;
+}
+
 } // namespace UKFMath
 
 #endif // HAL_NAVUKF_AVAILABLE

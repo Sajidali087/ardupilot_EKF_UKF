@@ -82,6 +82,36 @@ void add_process_noise(ftype P[NUM_ERR][NUM_ERR], const ProcessNoise &q, ftype d
     P[17][17] += wn;
 }
 
+ftype yaw_of_state(const ftype x[NUM_STATES])
+{
+    const ftype qw = x[0], qx = x[1], qy = x[2], qz = x[3];
+    return atan2F(2 * (qw * qz + qx * qy), 1 - 2 * (qy * qy + qz * qz));
+}
+
+uint8_t measure(Meas t, const ftype x[NUM_STATES], ftype zeta[UKFMath::MAX_MEAS], bool with_vertical)
+{
+    switch (t) {
+    case Meas::GPS_POS:
+        zeta[0] = x[7];
+        zeta[1] = x[8];
+        zeta[2] = x[9];
+        return with_vertical ? 3 : 2;
+    case Meas::GPS_VEL:
+        zeta[0] = x[4];
+        zeta[1] = x[5];
+        zeta[2] = x[6];
+        return with_vertical ? 3 : 2;
+    case Meas::BARO:
+        // baro altitude (up) relative to its value at initialisation
+        zeta[0] = -x[9] + x[16];
+        return 1;
+    case Meas::YAW:
+        zeta[0] = yaw_of_state(x);
+        return 1;
+    }
+    return 0;
+}
+
 } // namespace UKFModel
 
 #endif // HAL_NAVUKF_AVAILABLE

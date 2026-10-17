@@ -370,4 +370,147 @@ TEST(UKFMath, SigmaPointsFailNegativeDefinite)
     EXPECT_FALSE(sigma_points(x, P, w, chi, L, reg));
 }
 
+TEST(UKFMath, UpdateLinearMatchesKalman)
+{
+    // GPS-like position measurement: for a linear h the UKF update equals the Kalman update
+    static ftype x[NUM_STATES], P[NUM_ERR][NUM_ERR], L[NUM_ERR][NUM_ERR], chi[NUM_SIGMA][NUM_STATES];
+    static ftype Z[NUM_SIGMA][MAX_MEAS], Pk[NUM_ERR][NUM_ERR];
+    Weights w;
+    ASSERT_TRUE(compute_weights(1, 2, 0, NUM_ERR, w));
+    random_state(x);
+    random_spd(P, SIG);
+    uint8_t reg;
+    ASSERT_TRUE(sigma_points(x, P, w, chi, L, reg));
+    for (uint8_t i = 0; i < NUM_SIGMA; i++) {
+        for (uint8_t j = 0; j < 3; j++) {
+            Z[i][j] = chi[i][7 + j];
+        }
+    }
+    const ftype z[MAX_MEAS] = { x[7] + 2, x[8] - 3, x[9] + 1 };
+    const ftype R[MAX_MEAS] = { ftype(0.25), ftype(0.25), ftype(0.1225) };
+
+    // reference Kalman update with H selecting error states 6..8
+    ftype S[3][3], Sinv[3][3], K[NUM_ERR][3], nu[3];
+    for (uint8_t a = 0; a < 3; a++) {
+        nu[a] = z[a] - x[7 + a];
+        for (uint8_t b = 0; b < 3; b++) {
+            S[a][b] = P[6 + a][6 + b] + ((a == b) ? R[a] : 0);
+        }
+    }
+    const ftype det = S[0][0] * (S[1][1] * S[2][2] - S[1][2] * S[2][1])
+                    - S[0][1] * (S[1][0] * S[2][2] - S[1][2] * S[2][0])
+                    + S[0][2] * (S[1][0] * S[2][1] - S[1][1] * S[2][0]);
+    for (uint8_t a = 0; a < 3; a++) {
+        for (uint8_t b = 0; b < 3; b++) {
+            // inverse by cofactors (S symmetric)
+            const uint8_t r1 = (b + 1) % 3, r2 = (b + 2) % 3, c1 = (a + 1) % 3, c2 = (a + 2) % 3;
+            Sinv[a][b] = (S[r1][c1] * S[r2][c2] - S[r1][c2] * S[r2][c1]) / det;
+        }
+    }
+    ftype nis_ref = 0;
+    for (uint8_t a = 0; a < 3; a++) {
+        for (uint8_t b = 0; b < 3; b++) {
+            nis_ref += nu[a] * Sinv[a][b] * nu[b];
+        }
+    }
+    ftype corr[NUM_ERR];
+    for (uint8_t r = 0; r < NUM_ERR; r++) {
+        corr[r] = 0;
+        for (uint8_t b = 0; b < 3; b++) {
+            ftype s = 0;
+            for (uint8_t k = 0; k < 3; k++) {
+                s += P[r][6 + k] * Sinv[k][b];
+            }
+            K[r][b] = s;
+            corr[r] += s * nu[b];
+        }
+    }
+    for (uint8_t r = 0; r < NUM_ERR; r++) {
+        for (uint8_t c = 0; c < NUM_ERR; c++) {
+            ftype s = 0;
+            for (uint8_t k = 0; k < 3; k++) {
+                s += K[r][k] * P[c][6 + k];
+            }
+            Pk[r][c] = P[r][c] - s;
+        }
+    }
+
+    ftype xprior[NUM_STATES];
+    memcpy(xprior, x, sizeof(x));
+    UpdateResult res;
+    ASSERT_TRUE(unscented_update(x, P, w, chi, Z, 3, z, R, 0, res));
+    EXPECT_NEAR(res.nis, nis_ref, TOL * 100);
+    for (uint8_t j = 0; j < 3; j++) {
+        EXPECT_NEAR(res.innov[j], nu[j], TOL);
+    }
+    ftype d[NUM_ERR];
+    state_minus(x, xprior, d);
+    for (uint8_t r = 0; r < NUM_ERR; r++) {
+        EXPECT_NEAR(d[r], corr[r], TOL * 100);
+    }
+    const ftype scale = max_abs(&Pk[0][0], NUM_ERR * NUM_ERR);
+    for (uint8_t r = 0; r < NUM_ERR; r++) {
+        for (uint8_t c = 0; c < NUM_ERR; c++) {
+            EXPECT_NEAR(P[r][c], Pk[r][c], TOL * scale);
+        }
+    }
+}
+
+TEST(UKFMath, UpdateYawWrapsAtPi)
+{
+    // estimate yaw +179 deg, measurement -179 deg: innovation is +2 deg, not -358 deg
+    static ftype x[NUM_STATES], P[NUM_ERR][NUM_ERR], L[NUM_ERR][NUM_ERR], chi[NUM_SIGMA][NUM_STATES];
+    static ftype Z[NUM_SIGMA][MAX_MEAS];
+    Weights w;
+    ASSERT_TRUE(compute_weights(1, 2, 0, NUM_ERR, w));
+    const ftype deg = HALF_PI / 90;
+    memset(x, 0, sizeof(x));
+    QuaternionF q;
+    q.from_euler(0, 0, 179 * deg);
+    x[0] = q.q1; x[1] = q.q2; x[2] = q.q3; x[3] = q.q4;
+    memset(P, 0, sizeof(P));
+    for (uint8_t i = 0; i < NUM_ERR; i++) {
+        P[i][i] = ftype(0.01);
+    }
+    uint8_t reg;
+    ASSERT_TRUE(sigma_points(x, P, w, chi, L, reg));
+    for (uint8_t i = 0; i < NUM_SIGMA; i++) {
+        const QuaternionF qi(chi[i][0], chi[i][1], chi[i][2], chi[i][3]);
+        Z[i][0] = qi.get_euler_yaw();
+    }
+    const ftype z[MAX_MEAS] = { -179 * deg, 0, 0 };
+    const ftype R[MAX_MEAS] = { ftype(0.0025), 0, 0 };
+    UpdateResult res;
+    ASSERT_TRUE(unscented_update(x, P, w, chi, Z, 1, z, R, 1, res));
+    EXPECT_NEAR(res.innov[0], 2 * deg, ftype(1e-3));
+    // the estimate moves towards 180 deg, across the wrap
+    const QuaternionF qn(x[0], x[1], x[2], x[3]);
+    EXPECT_GT(fabsF(qn.get_euler_yaw()), 179 * deg);
+}
+
+TEST(UKFMath, UpdateRejectsInvalidS)
+{
+    // a negative measurement variance larger than the prediction spread makes S indefinite
+    static ftype x[NUM_STATES], P[NUM_ERR][NUM_ERR], L[NUM_ERR][NUM_ERR], chi[NUM_SIGMA][NUM_STATES];
+    static ftype Z[NUM_SIGMA][MAX_MEAS];
+    Weights w;
+    ASSERT_TRUE(compute_weights(1, 2, 0, NUM_ERR, w));
+    random_state(x);
+    random_spd(P, SIG);
+    uint8_t reg;
+    ASSERT_TRUE(sigma_points(x, P, w, chi, L, reg));
+    for (uint8_t i = 0; i < NUM_SIGMA; i++) {
+        Z[i][0] = chi[i][16];
+    }
+    ftype xprior[NUM_STATES];
+    memcpy(xprior, x, sizeof(x));
+    const ftype z[MAX_MEAS] = { x[16] + 1, 0, 0 };
+    const ftype R[MAX_MEAS] = { -1000, 0, 0 };
+    UpdateResult res;
+    EXPECT_FALSE(unscented_update(x, P, w, chi, Z, 1, z, R, 0, res));
+    for (uint8_t i = 0; i < NUM_STATES; i++) {
+        EXPECT_NEAR(x[i], xprior[i], 0);
+    }
+}
+
 AP_GTEST_MAIN()

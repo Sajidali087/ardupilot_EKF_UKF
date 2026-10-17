@@ -32,6 +32,7 @@ public:
     ftype ut_alpha() const { return _ut_alpha.get(); }
     ftype ut_beta() const { return _ut_beta.get(); }
     ftype ut_kappa() const { return _ut_kappa.get(); }
+    UKFModel::MeasNoise meas_noise() const;
 
 private:
     AP_Int8 _enable;
@@ -43,6 +44,12 @@ private:
     AP_Float _ut_alpha;
     AP_Float _ut_beta;
     AP_Float _ut_kappa;
+    AP_Float _gps_ph_noise;     // GPS horizontal position floor, m
+    AP_Float _gps_pv_noise;     // GPS vertical position floor, m
+    AP_Float _gps_v_noise;      // GPS velocity floor, m/s
+    AP_Float _baro_noise;       // baro altitude, m
+    AP_Float _bbias_noise;      // sigma_bb, m per sqrt(s)
+    AP_Float _yaw_noise;        // compass yaw floor, rad
 
     NavUKF_core core{*this};
 

@@ -29,6 +29,15 @@ struct ProcessNoise {
     ftype wind;         // sigma_w, m/s per sqrt(s)
 };
 
+// measurement noise settings (standard deviations, ukf_state_model.md Section 5)
+struct MeasNoise {
+    ftype gps_pos_h;    // m, floor
+    ftype gps_pos_v;    // m, floor
+    ftype gps_vel;      // m/s, floor
+    ftype baro;         // m
+    ftype yaw;          // rad
+};
+
 // roll and pitch (rad) from the mean specific force f (body, m/s^2) at rest
 void tilt_from_accel(const Vector3F &f, ftype &roll, ftype &pitch);
 
@@ -45,5 +54,19 @@ void predict_state(const ftype xin[NUM_STATES], const Vector3F &dAng, ftype dtA,
 
 // add the diagonal process noise of one step to P (error-state covariance)
 void add_process_noise(ftype P[NUM_ERR][NUM_ERR], const ProcessNoise &q, ftype dtA, ftype dtV);
+
+// measurement models h(x) (ukf_state_model.md Section 5), sequential updates
+enum class Meas : uint8_t {
+    GPS_POS = 0,    // p, 3 (2 if no vertical)
+    GPS_VEL = 1,    // v, 3 (2 if the receiver has no vertical velocity)
+    BARO = 2,       // -p_D + b_baro, 1
+    YAW = 3,        // yaw(q), 1, angle
+};
+
+// yaw (rad, -pi..pi) of the attitude quaternion in a state vector
+ftype yaw_of_state(const ftype x[NUM_STATES]);
+
+// fill zeta[0..m-1] = h(x) for measurement type t; returns m
+uint8_t measure(Meas t, const ftype x[NUM_STATES], ftype zeta[UKFMath::MAX_MEAS], bool with_vertical);
 
 } // namespace UKFModel

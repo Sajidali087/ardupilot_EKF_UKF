@@ -66,4 +66,28 @@ void unscented_mean(const ftype chi[NUM_SIGMA][NUM_STATES], const Weights &w, ft
 void unscented_covariance(const ftype chi[NUM_SIGMA][NUM_STATES], const ftype xbar[NUM_STATES], const Weights &w,
                           ftype P[NUM_ERR][NUM_ERR]);
 
+// largest measurement dimension of one sequential update (GPS position or velocity)
+static constexpr uint8_t MAX_MEAS = 3;
+
+// innovation statistics of one update
+struct UpdateResult {
+    uint8_t m;                  // measurement dimension
+    ftype innov[MAX_MEAS];      // z - z_bar (wrapped for angles)
+    ftype innov_sd[MAX_MEAS];   // sqrt of the diagonal of S
+    ftype nis;                  // nu^T S^-1 nu
+};
+
+/*
+  unscented measurement update (ukf_state_model.md Section 4).
+  chi: sigma points formed from (x, P) with sigma_points(); Z[i][j] = h_j(chi_i).
+  z: measurement, R: diagonal measurement variances, m <= MAX_MEAS.
+  angle_mask bit j set: measurement j is an angle (circular mean, differences wrapped to [-pi, pi]).
+  On success x <- x (+) K nu and P <- P - Pxz S^-1 Pxz^T (symmetrized).
+  Returns false (x, P unchanged) if S is not positive definite.
+ */
+bool unscented_update(ftype x[NUM_STATES], ftype P[NUM_ERR][NUM_ERR], const Weights &w,
+                      const ftype chi[NUM_SIGMA][NUM_STATES], const ftype Z[NUM_SIGMA][MAX_MEAS],
+                      uint8_t m, const ftype z[MAX_MEAS], const ftype R[MAX_MEAS], uint8_t angle_mask,
+                      UpdateResult &res);
+
 } // namespace UKFMath

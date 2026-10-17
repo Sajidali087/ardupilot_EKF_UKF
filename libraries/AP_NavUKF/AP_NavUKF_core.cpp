@@ -84,17 +84,10 @@ void NavUKF_core::try_initialise(const Vector3F &dAng, ftype dtA, const Vector3F
     // compasses used for yaw: mean corrected body-frame field
     const auto &compass = AP::dal().compass();
     Vector3F mag;
-    uint8_t nmag = 0;
-    for (uint8_t i = 0; i < compass.get_count(); i++) {
-        if (compass.use_for_yaw(i) && compass.healthy(i)) {
-            mag += compass.get_field(i).toftype();
-            nmag++;
-        }
-    }
-    if (nmag == 0) {
+    uint32_t mag_us;
+    if (!read_mag(mag, mag_us)) {
         return;
     }
-    mag /= ftype(nmag);
 
     // attitude
     ftype roll, pitch;
@@ -138,9 +131,139 @@ void NavUKF_core::try_initialise(const Vector3F &dAng, ftype dtA, const Vector3F
     if (!compute_weights(frontend.ut_alpha(), frontend.ut_beta(), frontend.ut_kappa(), NUM_ERR, weights)) {
         return;
     }
+
+    // the samples used here are not fused again; baro reference = altitude now, so b_baro starts at 0
+    last_gps_ms = gps.last_message_time_ms(gi);
+    last_mag_us = mag_us;
+    const auto &baro = AP::dal().baro();
+    const uint8_t bi = baro.get_primary();
+    have_baro_ref = baro.healthy(bi);
+    if (have_baro_ref) {
+        baro_ref = baro.get_altitude(bi);
+        last_baro_ms = baro.get_last_update(bi);
+    }
+
     last_regularised = 0;
     sigma_fail_count = 0;
     _initialised = true;
+}
+
+bool NavUKF_core::read_mag(Vector3F &mag, uint32_t &update_us) const
+{
+    const auto &compass = AP::dal().compass();
+    mag.zero();
+    update_us = 0;
+    uint8_t nmag = 0;
+    for (uint8_t i = 0; i < compass.get_count(); i++) {
+        if (compass.use_for_yaw(i) && compass.healthy(i)) {
+            mag += compass.get_field(i).toftype();
+            update_us = MAX(update_us, compass.last_update_usec(i));
+            nmag++;
+        }
+    }
+    if (nmag == 0) {
+        return false;
+    }
+    mag /= ftype(nmag);
+    return true;
+}
+
+bool NavUKF_core::fuse(UKFModel::Meas t, uint8_t m, const ftype z[MAX_MEAS], const ftype sd[MAX_MEAS])
+{
+    // fresh sigma points around the current estimate (ukf_state_model.md Section 4)
+    if (!sigma_points(x, P, weights, chi, L, last_regularised)) {
+        sigma_fail_count++;
+        return false;
+    }
+    const bool vertical = (m == 3);
+    for (uint8_t i = 0; i < NUM_SIGMA; i++) {
+        UKFModel::measure(t, chi[i], Z[i], vertical);
+    }
+    ftype R[MAX_MEAS] {};
+    for (uint8_t j = 0; j < m; j++) {
+        R[j] = sd[j] * sd[j];
+    }
+    const uint8_t angle_mask = (t == UKFModel::Meas::YAW) ? 1 : 0;
+    UpdateResult res;
+    if (!unscented_update(x, P, weights, chi, Z, m, z, R, angle_mask, res)) {
+        sigma_fail_count++;
+        return false;
+    }
+    Log_Write_Innov(uint8_t(t), res);
+    return true;
+}
+
+void NavUKF_core::fuse_gps(void)
+{
+    const auto &gps = AP::dal().gps();
+    const uint8_t gi = gps.primary_sensor();
+    if (gps.status(gi) < AP_DAL_GPS::GPS_OK_FIX_3D) {
+        return;
+    }
+    const uint32_t t_ms = gps.last_message_time_ms(gi);
+    if (t_ms == last_gps_ms) {
+        return;
+    }
+    last_gps_ms = t_ms;
+
+    const UKFModel::MeasNoise r = frontend.meas_noise();
+    float h_acc = 0, v_acc = 0, s_acc = 0;
+    const ftype sh = gps.horizontal_accuracy(gi, h_acc) ? MAX(ftype(h_acc), r.gps_pos_h) : r.gps_pos_h;
+    const ftype sv = gps.vertical_accuracy(gi, v_acc) ? MAX(ftype(v_acc), r.gps_pos_v) : r.gps_pos_v;
+    const ftype ss = gps.speed_accuracy(gi, s_acc) ? MAX(ftype(s_acc), r.gps_vel) : r.gps_vel;
+
+    // position: NED offset of the GPS location from the origin (no lever arm, no delay compensation)
+    const Vector3d d = origin.get_distance_NED_double(gps.location(gi));
+    const ftype zp[MAX_MEAS] = { ftype(d.x), ftype(d.y), ftype(d.z) };
+    const ftype sp[MAX_MEAS] = { sh, sh, sv };
+    fuse(UKFModel::Meas::GPS_POS, 3, zp, sp);
+
+    // velocity, vertical only if the receiver provides it
+    const Vector3F v = gps.velocity(gi).toftype();
+    const ftype zv[MAX_MEAS] = { v.x, v.y, v.z };
+    const ftype sdv[MAX_MEAS] = { ss, ss, ss };
+    fuse(UKFModel::Meas::GPS_VEL, gps.have_vertical_velocity(gi) ? 3 : 2, zv, sdv);
+}
+
+void NavUKF_core::fuse_baro(void)
+{
+    const auto &baro = AP::dal().baro();
+    const uint8_t bi = baro.get_primary();
+    if (!baro.healthy(bi)) {
+        return;
+    }
+    const uint32_t t_ms = baro.get_last_update(bi);
+    if (t_ms == last_baro_ms) {
+        return;
+    }
+    last_baro_ms = t_ms;
+    if (!have_baro_ref) {
+        // baro was not healthy at initialisation: reference so that b_baro starts at 0
+        baro_ref = baro.get_altitude(bi) + x[9];
+        have_baro_ref = true;
+        return;
+    }
+    const ftype z[MAX_MEAS] = { ftype(baro.get_altitude(bi)) - baro_ref, 0, 0 };
+    const ftype sd[MAX_MEAS] = { frontend.meas_noise().baro, 0, 0 };
+    fuse(UKFModel::Meas::BARO, 1, z, sd);
+}
+
+void NavUKF_core::fuse_yaw(void)
+{
+    Vector3F mag;
+    uint32_t t_us;
+    if (!read_mag(mag, t_us) || t_us == last_mag_us) {
+        return;
+    }
+    last_mag_us = t_us;
+
+    // tilt compensation with the current estimate (ukf_state_model.md 5.1)
+    const QuaternionF q(x[0], x[1], x[2], x[3]);
+    const ftype yaw = UKFModel::yaw_from_mag(mag, q.get_euler_roll(), q.get_euler_pitch(),
+                                             AP::dal().compass().get_declination());
+    const ftype z[MAX_MEAS] = { yaw, 0, 0 };
+    const ftype sd[MAX_MEAS] = { frontend.meas_noise().yaw, 0, 0 };
+    fuse(UKFModel::Meas::YAW, 1, z, sd);
 }
 
 void NavUKF_core::predict(const Vector3F &dAng, ftype dtA, const Vector3F &dVel, ftype dtV)
@@ -173,6 +296,9 @@ void NavUKF_core::update(void)
         return;
     }
     predict(dAng, dtA, dVel, dtV);
+    fuse_gps();
+    fuse_baro();
+    fuse_yaw();
     Log_Write();
 }
 
@@ -181,6 +307,7 @@ void NavUKF_core::update(void)
 #define UKF1_DEF "UKF1", "TimeUS,C,Roll,Pitch,Yaw,VN,VE,VD,PN,PE,PD", "s#ddhnnnmmm", "F-000000000", "QBfffffffff"
 #define UKF2_DEF "UKF2", "TimeUS,C,GX,GY,GZ,AX,AY,AZ,BB,WN,WE", "s#EEEooomnn", "F-000000000", "QBfffffffff"
 #define UKF3_DEF "UKF3", "TimeUS,C,SR,SP,SY,SVN,SVE,SVD,SPN,SPE,SPD,Reg,Fail", "s#dddnnnmmm--", "F-00000000000", "QBfffffffffBI"
+#define UKFN_DEF "UKFN", "TimeUS,C,T,I0,I1,I2,S0,S1,S2,NIS", "s#--------", "F-00000000", "QBBfffffff"
 
 /*
   In Replay, AP_Logger does not emit the FMT record of a Write() message by itself
@@ -200,6 +327,27 @@ static void emit_fmt_in_replay(const char *name, const char *labels, const char 
 #endif
 }
 #endif // HAL_LOGGING_ENABLED
+
+void NavUKF_core::Log_Write_Innov(uint8_t type, const UpdateResult &res) const
+{
+#if HAL_LOGGING_ENABLED
+    emit_fmt_in_replay(UKFN_DEF);
+    // @LoggerMessage: UKFN
+    // @Description: UKF shadow estimator: innovations of one update (T: 0 GPS position, 1 GPS velocity, 2 baro, 3 yaw)
+    ftype in[MAX_MEAS] {}, sd[MAX_MEAS] {};
+    for (uint8_t j = 0; j < res.m; j++) {
+        in[j] = res.innov[j];
+        sd[j] = res.innov_sd[j];
+    }
+    AP::logger().Write(UKFN_DEF,
+                       AP::dal().micros64(), DAL_CORE(0), type,
+                       float(in[0]), float(in[1]), float(in[2]),
+                       float(sd[0]), float(sd[1]), float(sd[2]),
+                       float(res.nis));
+#else
+    (void)type; (void)res;
+#endif
+}
 
 void NavUKF_core::Log_Write(void) const
 {

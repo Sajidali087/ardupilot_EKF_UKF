@@ -4,9 +4,6 @@
 
 #include <AP_DAL/AP_DAL.h>
 
-// baro bias process noise, m per sqrt(s): drift 38.55 m/h, (drift*60)/(3*sqrt(60)); parameter UKF_BBIAS_NSE comes with item 7
-static constexpr float BARO_BIAS_NOISE = 0.028f;
-
 const AP_Param::GroupInfo NavUKF::var_info[] = {
     // @Param: ENABLE
     // @DisplayName: Enable UKF shadow estimator
@@ -73,6 +70,53 @@ const AP_Param::GroupInfo NavUKF::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("KAPPA", 8, NavUKF, _ut_kappa, 0.0f),
 
+    // @Param: GPS_PH_NSE
+    // @DisplayName: GPS horizontal position noise
+    // @Description: Floor of the GPS horizontal position standard deviation; the receiver accuracy is used when larger. SITL horizontal noise is near zero, so this is a floor, not a measurement.
+    // @Units: m
+    // @Range: 0.1 10.0
+    // @User: Advanced
+    AP_GROUPINFO("GPS_PH_NSE", 9, NavUKF, _gps_ph_noise, 0.5f),
+
+    // @Param: GPS_PV_NSE
+    // @DisplayName: GPS vertical position noise
+    // @Description: Floor of the GPS vertical position standard deviation (static log); the receiver accuracy is used when larger
+    // @Units: m
+    // @Range: 0.1 10.0
+    // @User: Advanced
+    AP_GROUPINFO("GPS_PV_NSE", 10, NavUKF, _gps_pv_noise, 0.35f),
+
+    // @Param: GPS_V_NSE
+    // @DisplayName: GPS velocity noise
+    // @Description: Floor of the GPS velocity standard deviation (choice, not measured); the receiver speed accuracy is used when larger
+    // @Units: m/s
+    // @Range: 0.05 5.0
+    // @User: Advanced
+    AP_GROUPINFO("GPS_V_NSE", 11, NavUKF, _gps_v_noise, 0.1f),
+
+    // @Param: BARO_NSE
+    // @DisplayName: Barometer noise
+    // @Description: Barometer altitude standard deviation (static log, SIM_BARO_RND 0.2)
+    // @Units: m
+    // @Range: 0.05 5.0
+    // @User: Advanced
+    AP_GROUPINFO("BARO_NSE", 12, NavUKF, _baro_noise, 0.16f),
+
+    // @Param: BBIAS_NSE
+    // @DisplayName: Baro bias process noise
+    // @Description: Random walk of the baro bias state: (drift*60)/(3*sqrt(60)) with drift 38.55 m/h
+    // @Range: 0.0 1.0
+    // @User: Advanced
+    AP_GROUPINFO("BBIAS_NSE", 13, NavUKF, _bbias_noise, 0.028f),
+
+    // @Param: YAW_NSE
+    // @DisplayName: Compass yaw noise
+    // @Description: Standard deviation of the tilt-compensated compass yaw measurement
+    // @Units: rad
+    // @Range: 0.01 1.0
+    // @User: Advanced
+    AP_GROUPINFO("YAW_NSE", 14, NavUKF, _yaw_noise, 0.05f),
+
     AP_GROUPEND
 };
 
@@ -88,9 +132,20 @@ UKFModel::ProcessNoise NavUKF::process_noise() const
     q.accel = _acc_noise.get();
     q.gyro_bias = _gbias_noise.get();
     q.accel_bias = _abias_noise.get();
-    q.baro_bias = BARO_BIAS_NOISE;
+    q.baro_bias = _bbias_noise.get();
     q.wind = _wind_noise.get();
     return q;
+}
+
+UKFModel::MeasNoise NavUKF::meas_noise() const
+{
+    UKFModel::MeasNoise r;
+    r.gps_pos_h = _gps_ph_noise.get();
+    r.gps_pos_v = _gps_pv_noise.get();
+    r.gps_vel = _gps_v_noise.get();
+    r.baro = _baro_noise.get();
+    r.yaw = _yaw_noise.get();
+    return r;
 }
 
 void NavUKF::UpdateFilter(void)

@@ -35,7 +35,15 @@ private:
     // sigma point work space
     ftype chi[UKFMath::NUM_SIGMA][UKFMath::NUM_STATES];
     ftype L[UKFMath::NUM_ERR][UKFMath::NUM_ERR];
+    ftype Z[UKFMath::NUM_SIGMA][UKFMath::MAX_MEAS];
     UKFMath::Weights weights;
+
+    // sensor sample stamps already fused
+    uint32_t last_gps_ms;
+    uint32_t last_baro_ms;
+    uint32_t last_mag_us;
+    ftype baro_ref;                 // baro altitude at initialisation, m
+    bool have_baro_ref;
 
     bool _initialised;
     Location origin;                // first valid GPS fix: NED origin
@@ -48,7 +56,7 @@ private:
 
     // health counters
     uint8_t last_regularised;       // jitter retries in the last sigma point set
-    uint32_t sigma_fail_count;      // sigma point sets that could not be formed
+    uint32_t sigma_fail_count;      // sigma point sets or updates that could not be done
 
     // read IMU 0 deltas; false if not usable
     bool read_imu(Vector3F &dAng, ftype &dtA, Vector3F &dVel, ftype &dtV) const;
@@ -60,8 +68,22 @@ private:
     // sigma point prediction with the IMU deltas, then process noise
     void predict(const Vector3F &dAng, ftype dtA, const Vector3F &dVel, ftype dtV);
 
+    // sequential measurement updates on new sensor samples (items 6, 7, 8)
+    void fuse_gps(void);
+    void fuse_baro(void);
+    void fuse_yaw(void);
+
+    // one unscented update of measurement t with fresh sigma points; logs UKFN
+    bool fuse(UKFModel::Meas t, uint8_t m, const ftype z[UKFMath::MAX_MEAS], const ftype sd[UKFMath::MAX_MEAS]);
+
+    // mean body-frame field of the compasses used for yaw and the newest update time; false if none
+    bool read_mag(Vector3F &mag, uint32_t &update_us) const;
+
     // UKF1 (attitude, velocity, position), UKF2 (biases, wind), UKF3 (standard deviations, health)
     void Log_Write(void) const;
+
+    // UKFN: innovations, their standard deviations and NIS of one update
+    void Log_Write_Innov(uint8_t type, const UKFMath::UpdateResult &res) const;
 };
 
 #endif // HAL_NAVUKF_AVAILABLE

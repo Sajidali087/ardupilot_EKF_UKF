@@ -1,0 +1,175 @@
+/*
+  unit tests for the UKF models (Step 11 items 4 and 5)
+  checks planned in docs/ukf_state_model.md Sections 3 and 11:
+  tilt and yaw alignment, hover with zero drift, constant yaw rate, constant acceleration
+ */
+#include <AP_gtest.h>
+
+#include <AP_NavUKF/AP_NavUKF_model.h>
+
+const AP_HAL::HAL& hal = AP_HAL::get_HAL();
+
+using namespace UKFMath;
+using namespace UKFModel;
+
+static const ftype TOL = (sizeof(ftype) == 8) ? ftype(1e-9) : ftype(1e-4);
+
+// full-precision angles (SITL compiles with -fsingle-precision-constant)
+static const ftype HALF_PI = acosF(ftype(0));
+static const ftype G = ftype(GRAVITY_MSS);
+
+static void state_from_euler(ftype x[NUM_STATES], ftype roll, ftype pitch, ftype yaw)
+{
+    memset(x, 0, sizeof(ftype) * NUM_STATES);
+    QuaternionF q;
+    q.from_euler(roll, pitch, yaw);
+    x[0] = q.q1; x[1] = q.q2; x[2] = q.q3; x[3] = q.q4;
+}
+
+// specific force the accelerometer reads at rest with this attitude
+static Vector3F rest_specific_force(ftype roll, ftype pitch, ftype yaw)
+{
+    QuaternionF q;
+    q.from_euler(roll, pitch, yaw);
+    return q.inverse() * Vector3F(0, 0, -G);
+}
+
+TEST(UKFModel, TiltFromAccelRecoversRollPitch)
+{
+    const ftype cases[][2] = { {0, 0}, {ftype(0.3), 0}, {0, ftype(-0.4)}, {ftype(-0.7), ftype(0.5)}, {ftype(1.2), ftype(-1.0)} };
+    for (const auto &c : cases) {
+        ftype roll, pitch;
+        tilt_from_accel(rest_specific_force(c[0], c[1], ftype(2.0)), roll, pitch);
+        EXPECT_NEAR(roll, c[0], TOL);
+        EXPECT_NEAR(pitch, c[1], TOL);
+    }
+}
+
+TEST(UKFModel, YawFromMagRecoversYaw)
+{
+    // earth field: north and down components, declination 0.2 rad east
+    const ftype decl = ftype(0.2);
+    const Vector3F field_ned(ftype(0.25), 0, ftype(0.45));
+    const ftype cases[][3] = { {0, 0, 0}, {ftype(0.3), ftype(-0.2), ftype(1.0)}, {ftype(-0.5), ftype(0.4), ftype(-2.5)}, {0, 0, ftype(3.0)} };
+    for (const auto &c : cases) {
+        QuaternionF q;
+        q.from_euler(c[0], c[1], c[2]);
+        // magnetic north is rotated by the declination from true north
+        QuaternionF qd;
+        qd.from_euler(0, 0, decl);
+        const Vector3F mag_body = q.inverse() * (qd * field_ned);
+        const ftype yaw = yaw_from_mag(mag_body, c[0], c[1], decl);
+        EXPECT_NEAR(wrap_PI(yaw - c[2]), 0, TOL);
+    }
+}
+
+TEST(UKFModel, HoverHasZeroDrift)
+{
+    // level, at rest: dv = -g dt along body down, no rotation -> state unchanged
+    ftype x[NUM_STATES], y[NUM_STATES];
+    state_from_euler(x, 0, 0, ftype(0.8));
+    x[7] = 10; x[8] = -5; x[9] = -100;
+    const ftype dt = ftype(0.02);
+    memcpy(y, x, sizeof(x));
+    for (uint16_t k = 0; k < 3000; k++) {     // 60 s
+        predict_state(y, Vector3F(), dt, Vector3F(0, 0, -G * dt), dt, y);
+    }
+    for (uint8_t i = 0; i < NUM_STATES; i++) {
+        EXPECT_NEAR(y[i], x[i], TOL * 100);
+    }
+}
+
+TEST(UKFModel, TiltedRestHasZeroDrift)
+{
+    // tilted but at rest: the accelerometer reads the rotated -g, velocity stays zero
+    ftype x[NUM_STATES];
+    state_from_euler(x, ftype(0.4), ftype(-0.3), ftype(1.5));
+    const Vector3F f = rest_specific_force(ftype(0.4), ftype(-0.3), ftype(1.5));
+    const ftype dt = ftype(0.02);
+    for (uint16_t k = 0; k < 3000; k++) {
+        predict_state(x, Vector3F(), dt, f * dt, dt, x);
+    }
+    for (uint8_t i = 4; i < 10; i++) {
+        EXPECT_NEAR(x[i], 0, TOL * 1000);
+    }
+}
+
+TEST(UKFModel, ConstantYawRate)
+{
+    // level, 0.1 rad/s about body down for 10 s -> yaw +1 rad, roll and pitch stay 0
+    ftype x[NUM_STATES];
+    state_from_euler(x, 0, 0, 0);
+    const ftype dt = ftype(0.02), rate = ftype(0.1);
+    for (uint16_t k = 0; k < 500; k++) {
+        predict_state(x, Vector3F(0, 0, rate * dt), dt, Vector3F(0, 0, -G * dt), dt, x);
+    }
+    // expected values use the elapsed time 500 * dt (dt is a float literal, not exactly 0.02)
+    const ftype T = 500 * dt;
+    const QuaternionF q(x[0], x[1], x[2], x[3]);
+    EXPECT_NEAR(q.get_euler_yaw(), rate * T, TOL * 100);
+    EXPECT_NEAR(q.get_euler_roll(), 0, TOL);
+    EXPECT_NEAR(q.get_euler_pitch(), 0, TOL);
+}
+
+TEST(UKFModel, GyroBiasIsRemoved)
+{
+    // the gyro reads its bias only: with the bias in the state the attitude does not move
+    ftype x[NUM_STATES];
+    state_from_euler(x, 0, 0, 0);
+    x[10] = ftype(0.01); x[11] = ftype(-0.005); x[12] = ftype(0.005);
+    const ftype dt = ftype(0.02);
+    const Vector3F dAng = Vector3F(x[10], x[11], x[12]) * dt;
+    for (uint16_t k = 0; k < 3000; k++) {
+        predict_state(x, dAng, dt, Vector3F(0, 0, -G * dt), dt, x);
+    }
+    EXPECT_NEAR(x[0], 1, TOL);
+    EXPECT_NEAR(Vector3F(x[1], x[2], x[3]).length(), 0, TOL);
+}
+
+TEST(UKFModel, ConstantAcceleration)
+{
+    // yaw 90 deg (nose east), 2 m/s^2 forward for 10 s from 5 m/s north:
+    // v = (5, 20, 0), p = (50, 100, 0)
+    ftype x[NUM_STATES];
+    state_from_euler(x, 0, 0, HALF_PI);
+    x[4] = 5;
+    const ftype dt = ftype(0.02), a = 2;
+    for (uint16_t k = 0; k < 500; k++) {
+        predict_state(x, Vector3F(), dt, Vector3F(a * dt, 0, -G * dt), dt, x);
+    }
+    // expected values use the elapsed time 500 * dt (dt is a float literal, not exactly 0.02)
+    const ftype T = 500 * dt;
+    EXPECT_NEAR(x[4], 5, TOL * 100);
+    EXPECT_NEAR(x[5], a * T, TOL * 100);
+    EXPECT_NEAR(x[6], 0, TOL * 100);
+    EXPECT_NEAR(x[7], 5 * T, TOL * 1000);
+    EXPECT_NEAR(x[8], ftype(0.5) * a * T * T, TOL * 1000);
+    EXPECT_NEAR(x[9], 0, TOL * 1000);
+}
+
+TEST(UKFModel, ProcessNoiseDiagonal)
+{
+    static ftype P[NUM_ERR][NUM_ERR];
+    memset(P, 0, sizeof(P));
+    ProcessNoise q { ftype(3.9e-4), ftype(1.1e-3), ftype(1e-4), ftype(1e-3), ftype(0.028), ftype(0.1) };
+    const ftype dt = ftype(0.02);
+    add_process_noise(P, q, dt, dt);
+    // with dt = tau the attitude and velocity rows are (sigma * dt)^2
+    EXPECT_NEAR(P[0][0], q.gyro * dt * q.gyro * dt, TOL * TOL);
+    EXPECT_NEAR(P[5][5], q.accel * dt * q.accel * dt, TOL * TOL);
+    EXPECT_NEAR(P[9][9], q.gyro_bias * q.gyro_bias * dt, TOL * TOL);
+    EXPECT_NEAR(P[15][15], q.baro_bias * q.baro_bias * dt, TOL * TOL);
+    EXPECT_NEAR(P[17][17], q.wind * q.wind * dt, TOL * TOL);
+    // nothing off the diagonal
+    ftype off = 0;
+    for (uint8_t i = 0; i < NUM_ERR; i++) {
+        for (uint8_t j = 0; j < NUM_ERR; j++) {
+            if (i != j) {
+                off += fabsF(P[i][j]);
+            }
+        }
+    }
+    EXPECT_NEAR(off, 0, 0);
+}
+
+AP_GTEST_MAIN()

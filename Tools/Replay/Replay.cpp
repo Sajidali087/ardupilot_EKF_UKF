@@ -302,8 +302,9 @@ void Replay::loop()
 {
     if (!reader.update()) {
         // UKF stub check: how many frames reached NavUKF::UpdateFilter
-        printf("UKF: UKF_ENABLE=%d, UpdateFilter ran %u frames\n",
-               int(_vehicle.ukf.enabled()), unsigned(_vehicle.ukf.frame_count()));
+        printf("UKF: UKF_ENABLE=%d, UpdateFilter ran %u frames, initialised=%d\n",
+               int(_vehicle.ukf.enabled()), unsigned(_vehicle.ukf.frame_count()),
+               int(_vehicle.ukf.initialised()));
 #if CONFIG_HAL_BOARD == HAL_BOARD_LINUX
     // If we don't tear down the threads then they continue to access
     // global state during object destruction.

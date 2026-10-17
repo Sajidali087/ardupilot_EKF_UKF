@@ -6,6 +6,8 @@
 
 #include <AP_Param/AP_Param.h>
 
+#include "AP_NavUKF_core.h"
+
 class NavUKF {
 public:
     NavUKF();
@@ -22,8 +24,27 @@ public:
     // number of UpdateFilter calls that ran (stub check for Replay)
     uint32_t frame_count() const { return _frame_count; }
 
+    // true once the core has aligned and initialised
+    bool initialised() const { return core.initialised(); }
+
+    // tuning values for the core
+    UKFModel::ProcessNoise process_noise() const;
+    ftype ut_alpha() const { return _ut_alpha.get(); }
+    ftype ut_beta() const { return _ut_beta.get(); }
+    ftype ut_kappa() const { return _ut_kappa.get(); }
+
 private:
     AP_Int8 _enable;
+    AP_Float _gyr_noise;        // sigma_g, rad/s
+    AP_Float _acc_noise;        // sigma_a, m/s^2
+    AP_Float _gbias_noise;      // sigma_bg, rad/s per sqrt(s)
+    AP_Float _abias_noise;      // sigma_ba, m/s^2 per sqrt(s)
+    AP_Float _wind_noise;       // sigma_w, m/s per sqrt(s)
+    AP_Float _ut_alpha;
+    AP_Float _ut_beta;
+    AP_Float _ut_kappa;
+
+    NavUKF_core core{*this};
 
     uint32_t _frame_count;
 };

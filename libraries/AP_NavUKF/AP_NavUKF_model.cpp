@@ -82,6 +82,17 @@ void add_process_noise(ftype P[NUM_ERR][NUM_ERR], const ProcessNoise &q, ftype d
     P[17][17] += wn;
 }
 
+bool nis_inside_bounds(ftype nis, uint8_t m)
+{
+    // two-sided 95 % bounds of chi-square with m degrees of freedom (2.5 % and 97.5 % points)
+    static const float lo[] = { 0.0f, 0.000982f, 0.0506f, 0.216f };
+    static const float hi[] = { 0.0f, 5.024f, 7.378f, 9.348f };
+    if (m < 1 || m > 3) {
+        return false;
+    }
+    return nis >= lo[m] && nis <= hi[m];
+}
+
 ftype yaw_of_state(const ftype x[NUM_STATES])
 {
     const ftype qw = x[0], qx = x[1], qy = x[2], qz = x[3];

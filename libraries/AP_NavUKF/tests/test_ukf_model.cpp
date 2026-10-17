@@ -172,4 +172,17 @@ TEST(UKFModel, ProcessNoiseDiagonal)
     EXPECT_NEAR(off, 0, 0);
 }
 
+TEST(UKFModel, NisBounds)
+{
+    // two-sided 95 % chi-square bounds (ukf_state_model.md Section 8)
+    EXPECT_TRUE(nis_inside_bounds(1, 1));
+    EXPECT_FALSE(nis_inside_bounds(ftype(0.0005), 1));
+    EXPECT_FALSE(nis_inside_bounds(ftype(5.1), 1));
+    EXPECT_TRUE(nis_inside_bounds(3, 3));
+    EXPECT_FALSE(nis_inside_bounds(ftype(0.2), 3));
+    EXPECT_FALSE(nis_inside_bounds(ftype(9.4), 3));
+    EXPECT_TRUE(nis_inside_bounds(2, 2));
+    EXPECT_FALSE(nis_inside_bounds(1, 4));
+}
+
 AP_GTEST_MAIN()

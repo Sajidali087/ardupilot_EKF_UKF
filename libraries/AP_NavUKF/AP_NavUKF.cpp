@@ -72,11 +72,11 @@ const AP_Param::GroupInfo NavUKF::var_info[] = {
 
     // @Param: GPS_PH_NSE
     // @DisplayName: GPS horizontal position noise
-    // @Description: Floor of the GPS horizontal position standard deviation; the receiver accuracy is used when larger. SITL horizontal noise is near zero, so this is a floor, not a measurement.
+    // @Description: Floor of the GPS horizontal position standard deviation; the receiver accuracy is used when larger. SITL horizontal noise is near zero; the error seen in flight (0.18-0.35 m on D2) is a 17 ms timing offset times speed.
     // @Units: m
     // @Range: 0.1 10.0
     // @User: Advanced
-    AP_GROUPINFO("GPS_PH_NSE", 9, NavUKF, _gps_ph_noise, 0.5f),
+    AP_GROUPINFO("GPS_PH_NSE", 9, NavUKF, _gps_ph_noise, 0.3f),
 
     // @Param: GPS_PV_NSE
     // @DisplayName: GPS vertical position noise
@@ -88,19 +88,19 @@ const AP_Param::GroupInfo NavUKF::var_info[] = {
 
     // @Param: GPS_V_NSE
     // @DisplayName: GPS velocity noise
-    // @Description: Floor of the GPS velocity standard deviation (choice, not measured); the receiver speed accuracy is used when larger
+    // @Description: Floor of the GPS velocity standard deviation (D2 flight vs truth: 0.052 N, 0.054 E, 0.031 D m/s); the receiver speed accuracy is used when larger (SITL reports 0)
     // @Units: m/s
-    // @Range: 0.05 5.0
+    // @Range: 0.01 5.0
     // @User: Advanced
-    AP_GROUPINFO("GPS_V_NSE", 11, NavUKF, _gps_v_noise, 0.1f),
+    AP_GROUPINFO("GPS_V_NSE", 11, NavUKF, _gps_v_noise, 0.054f),
 
     // @Param: BARO_NSE
     // @DisplayName: Barometer noise
-    // @Description: Barometer altitude standard deviation (static log, SIM_BARO_RND 0.2)
+    // @Description: Barometer altitude standard deviation (D2 flight vs truth 0.117 m; static log 0.16 m)
     // @Units: m
     // @Range: 0.05 5.0
     // @User: Advanced
-    AP_GROUPINFO("BARO_NSE", 12, NavUKF, _baro_noise, 0.16f),
+    AP_GROUPINFO("BARO_NSE", 12, NavUKF, _baro_noise, 0.12f),
 
     // @Param: BBIAS_NSE
     // @DisplayName: Baro bias process noise
@@ -111,11 +111,11 @@ const AP_Param::GroupInfo NavUKF::var_info[] = {
 
     // @Param: YAW_NSE
     // @DisplayName: Compass yaw noise
-    // @Description: Standard deviation of the tilt-compensated compass yaw measurement
+    // @Description: Standard deviation of the tilt-compensated compass yaw measurement. D2: 0.0215 rad against truth with the true tilt; the yaw innovations with the estimated tilt spread 0.0325 rad, so 0.03 is used (NIS mean 1.16)
     // @Units: rad
-    // @Range: 0.01 1.0
+    // @Range: 0.005 1.0
     // @User: Advanced
-    AP_GROUPINFO("YAW_NSE", 14, NavUKF, _yaw_noise, 0.05f),
+    AP_GROUPINFO("YAW_NSE", 14, NavUKF, _yaw_noise, 0.03f),
 
     AP_GROUPEND
 };

@@ -27,6 +27,10 @@ public:
     // true once the core has aligned and initialised
     bool initialised() const { return core.initialised(); }
 
+    // NIS monitoring after the settling time, per measurement type (0 GPS pos, 1 GPS vel, 2 baro, 3 yaw)
+    uint32_t nis_count(uint8_t t) const { return core.nis_count(t); }
+    uint32_t nis_inside(uint8_t t) const { return core.nis_inside(t); }
+
     // tuning values for the core
     UKFModel::ProcessNoise process_noise() const;
     ftype ut_alpha() const { return _ut_alpha.get(); }

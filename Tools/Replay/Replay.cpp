@@ -305,6 +305,13 @@ void Replay::loop()
         printf("UKF: UKF_ENABLE=%d, UpdateFilter ran %u frames, initialised=%d\n",
                int(_vehicle.ukf.enabled()), unsigned(_vehicle.ukf.frame_count()),
                int(_vehicle.ukf.initialised()));
+        // NIS monitoring (Step 11 item 10): share of updates inside the 95 % bounds after 60 s
+        const char *nis_names[] = { "GPS pos", "GPS vel", "baro", "yaw" };
+        printf("UKF NIS in 95%% bounds after 60 s:");
+        for (uint8_t t = 0; t < 4; t++) {
+            const uint32_t n = _vehicle.ukf.nis_count(t);
+            printf(" %s %.1f%% (%u)%s", nis_names[t], n ? 100.0 * _vehicle.ukf.nis_inside(t) / n : 0.0, unsigned(n), t < 3 ? "," : "\n");
+        }
 #if CONFIG_HAL_BOARD == HAL_BOARD_LINUX
     // If we don't tear down the threads then they continue to access
     // global state during object destruction.

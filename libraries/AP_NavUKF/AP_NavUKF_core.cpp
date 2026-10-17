@@ -10,6 +10,9 @@
 
 using namespace UKFMath;
 
+// NIS statistics start after this settling time (Step 12: "after 60 s")
+static constexpr uint32_t NIS_SETTLE_US = 60000000U;
+
 // alignment window and at-rest limits (Step 11 item 4)
 static constexpr float ALIGN_WINDOW_S = 1.0f;       // seconds of IMU data averaged for tilt
 static constexpr float ALIGN_ACCEL_TOL = 0.5f;      // | |f| - g | allowed at rest, m/s^2
@@ -145,6 +148,9 @@ void NavUKF_core::try_initialise(const Vector3F &dAng, ftype dtA, const Vector3F
 
     last_regularised = 0;
     sigma_fail_count = 0;
+    init_time_us = AP::dal().micros64();
+    memset(_nis_count, 0, sizeof(_nis_count));
+    memset(_nis_inside, 0, sizeof(_nis_inside));
     _initialised = true;
 }
 
@@ -189,7 +195,14 @@ bool NavUKF_core::fuse(UKFModel::Meas t, uint8_t m, const ftype z[MAX_MEAS], con
         sigma_fail_count++;
         return false;
     }
-    Log_Write_Innov(uint8_t(t), res);
+    const bool inside = UKFModel::nis_inside_bounds(res.nis, m);
+    if (AP::dal().micros64() - init_time_us >= NIS_SETTLE_US) {
+        _nis_count[uint8_t(t)]++;
+        if (inside) {
+            _nis_inside[uint8_t(t)]++;
+        }
+    }
+    Log_Write_Innov(uint8_t(t), res, inside);
     return true;
 }
 
@@ -307,7 +320,7 @@ void NavUKF_core::update(void)
 #define UKF1_DEF "UKF1", "TimeUS,C,Roll,Pitch,Yaw,VN,VE,VD,PN,PE,PD", "s#ddhnnnmmm", "F-000000000", "QBfffffffff"
 #define UKF2_DEF "UKF2", "TimeUS,C,GX,GY,GZ,AX,AY,AZ,BB,WN,WE", "s#EEEooomnn", "F-000000000", "QBfffffffff"
 #define UKF3_DEF "UKF3", "TimeUS,C,SR,SP,SY,SVN,SVE,SVD,SPN,SPE,SPD,Reg,Fail", "s#dddnnnmmm--", "F-00000000000", "QBfffffffffBI"
-#define UKFN_DEF "UKFN", "TimeUS,C,T,I0,I1,I2,S0,S1,S2,NIS", "s#--------", "F-00000000", "QBBfffffff"
+#define UKFN_DEF "UKFN", "TimeUS,C,T,I0,I1,I2,S0,S1,S2,NIS,In", "s#---------", "F-000000000", "QBBfffffffB"
 
 /*
   In Replay, AP_Logger does not emit the FMT record of a Write() message by itself
@@ -328,12 +341,12 @@ static void emit_fmt_in_replay(const char *name, const char *labels, const char 
 }
 #endif // HAL_LOGGING_ENABLED
 
-void NavUKF_core::Log_Write_Innov(uint8_t type, const UpdateResult &res) const
+void NavUKF_core::Log_Write_Innov(uint8_t type, const UpdateResult &res, bool inside) const
 {
 #if HAL_LOGGING_ENABLED
     emit_fmt_in_replay(UKFN_DEF);
     // @LoggerMessage: UKFN
-    // @Description: UKF shadow estimator: innovations of one update (T: 0 GPS position, 1 GPS velocity, 2 baro, 3 yaw)
+    // @Description: UKF shadow estimator: innovations of one update (T: 0 GPS position, 1 GPS velocity, 2 baro, 3 yaw); In: 1 if NIS is inside the 95 % bounds
     ftype in[MAX_MEAS] {}, sd[MAX_MEAS] {};
     for (uint8_t j = 0; j < res.m; j++) {
         in[j] = res.innov[j];
@@ -343,9 +356,9 @@ void NavUKF_core::Log_Write_Innov(uint8_t type, const UpdateResult &res) const
                        AP::dal().micros64(), DAL_CORE(0), type,
                        float(in[0]), float(in[1]), float(in[2]),
                        float(sd[0]), float(sd[1]), float(sd[2]),
-                       float(res.nis));
+                       float(res.nis), uint8_t(inside));
 #else
-    (void)type; (void)res;
+    (void)type; (void)res; (void)inside;
 #endif
 }
 

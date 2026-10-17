@@ -63,6 +63,9 @@ enum class Meas : uint8_t {
     YAW = 3,        // yaw(q), 1, angle
 };
 
+// true if NIS lies inside the two-sided 95 % chi-square bounds for m degrees of freedom (ukf_state_model.md Section 8)
+bool nis_inside_bounds(ftype nis, uint8_t m);
+
 // yaw (rad, -pi..pi) of the attitude quaternion in a state vector
 ftype yaw_of_state(const ftype x[NUM_STATES]);
 

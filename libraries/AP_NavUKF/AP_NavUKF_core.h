@@ -25,6 +25,11 @@ public:
 
     bool initialised(void) const { return _initialised; }
 
+    // NIS monitoring: updates of measurement type t (0..3) counted after the settling time, and how many had NIS inside the 95 % bounds
+    uint32_t nis_count(uint8_t t) const { return t < NUM_MEAS_TYPES ? _nis_count[t] : 0; }
+    uint32_t nis_inside(uint8_t t) const { return t < NUM_MEAS_TYPES ? _nis_inside[t] : 0; }
+    static constexpr uint8_t NUM_MEAS_TYPES = 4;
+
 private:
     const NavUKF &frontend;
 
@@ -47,6 +52,11 @@ private:
 
     bool _initialised;
     Location origin;                // first valid GPS fix: NED origin
+    uint64_t init_time_us;          // DAL time of initialisation
+
+    // NIS monitoring (ukf_state_model.md Section 8)
+    uint32_t _nis_count[NUM_MEAS_TYPES];
+    uint32_t _nis_inside[NUM_MEAS_TYPES];
 
     // alignment at rest: accelerometer and gyro means over a window
     Vector3F align_f_sum;
@@ -83,7 +93,7 @@ private:
     void Log_Write(void) const;
 
     // UKFN: innovations, their standard deviations and NIS of one update
-    void Log_Write_Innov(uint8_t type, const UKFMath::UpdateResult &res) const;
+    void Log_Write_Innov(uint8_t type, const UKFMath::UpdateResult &res, bool inside) const;
 };
 
 #endif // HAL_NAVUKF_AVAILABLE

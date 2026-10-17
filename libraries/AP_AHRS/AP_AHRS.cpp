@@ -752,6 +752,9 @@ void AP_AHRS::update_EKF3(void)
     }
     if (_ekf3_started) {
         EKF3.UpdateFilter();
+#if HAL_NAVUKF_AVAILABLE
+        UKF.UpdateFilter();
+#endif
         if (_active_EKF_type() == EKFType::THREE) {
             Vector3f eulers;
             EKF3.getRotationBodyToNED(state.dcm_matrix);

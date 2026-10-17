@@ -5,6 +5,7 @@
 #include <AP_GPS/AP_GPS.h>
 #include <AP_NavEKF2/AP_NavEKF2.h>
 #include <AP_NavEKF3/AP_NavEKF3.h>
+#include <AP_NavUKF/AP_NavUKF.h>
 
 class LR_MsgHandler : public MsgHandler {
 public:
@@ -41,8 +42,13 @@ protected:
 
 class LR_MsgHandler_RFRF : public LR_MsgHandler_EKF
 {
-    using LR_MsgHandler_EKF::LR_MsgHandler_EKF;
+public:
+    LR_MsgHandler_RFRF(struct log_Format &_f, NavEKF2 &_ekf2, NavEKF3 &_ekf3, NavUKF &_ukf) :
+        LR_MsgHandler_EKF(_f, _ekf2, _ekf3),
+        ukf(_ukf) {}
     void process_message(uint8_t *msg) override;
+private:
+    NavUKF &ukf;
 };
 
 class LR_MsgHandler_ROFH : public LR_MsgHandler_EKF

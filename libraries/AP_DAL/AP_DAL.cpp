@@ -13,6 +13,7 @@
 #if APM_BUILD_TYPE(APM_BUILD_Replay)
 #include <AP_NavEKF2/AP_NavEKF2.h>
 #include <AP_NavEKF3/AP_NavEKF3.h>
+#include <AP_NavUKF/AP_NavUKF.h>
 #endif
 
 extern const AP_HAL::HAL& hal;
@@ -439,9 +440,9 @@ void AP_DAL::writeTerrainData(float alt_m)
 
 #if APM_BUILD_TYPE(APM_BUILD_Replay)
 /*
-  handle frame message. This message triggers the EKF2/EKF3 updates and logging
+  handle frame message. This message triggers the EKF2/EKF3/UKF updates and logging
  */
-void AP_DAL::handle_message(const log_RFRF &msg, NavEKF2 &ekf2, NavEKF3 &ekf3)
+void AP_DAL::handle_message(const log_RFRF &msg, NavEKF2 &ekf2, NavEKF3 &ekf3, NavUKF &ukf)
 {
     _RFRF.core_slow = msg.core_slow;
 
@@ -471,6 +472,14 @@ void AP_DAL::handle_message(const log_RFRF &msg, NavEKF2 &ekf2, NavEKF3 &ekf3)
         if (ekf3_init_done) {
             ekf3.UpdateFilter();
         }
+    }
+    /*
+      UKF shadow estimator: runs on its own bit, or on the EKF3 update
+      bit when UKF_ENABLE=1 (logs recorded before the UKF existed)
+     */
+    if ((frame_types & uint8_t(AP_DAL::FrameType::UpdateFilterUKF)) ||
+        ((frame_types & uint8_t(AP_DAL::FrameType::UpdateFilterEKF3)) && ukf.enabled())) {
+        ukf.UpdateFilter();
     }
     if (frame_types & uint8_t(AP_DAL::FrameType::LogWriteEKF2)) {
         ekf2.Log_Write();

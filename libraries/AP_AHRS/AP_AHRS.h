@@ -28,6 +28,7 @@
 #include "AP_AHRS_Backend.h"
 #include <AP_NavEKF2/AP_NavEKF2.h>
 #include <AP_NavEKF3/AP_NavEKF3.h>
+#include <AP_NavUKF/AP_NavUKF.h>
 #include <AP_NavEKF/AP_Nav_Common.h>              // definitions shared by inertial and ekf nav filters
 
 #include "AP_AHRS_DCM.h"
@@ -495,6 +496,9 @@ public:
 #endif
 #if HAL_NAVEKF3_AVAILABLE
     NavEKF3 EKF3;
+#endif
+#if HAL_NAVUKF_AVAILABLE
+    NavUKF UKF;     // shadow estimator, never selected by AHRS_EKF_TYPE
 #endif
 
     // for holding parameters

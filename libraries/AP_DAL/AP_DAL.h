@@ -34,6 +34,7 @@
 
 class NavEKF2;
 class NavEKF3;
+class NavUKF;
 
 class AP_DAL {
 public:
@@ -45,6 +46,7 @@ public:
         UpdateFilterEKF3 = 1<<3,
         LogWriteEKF2 = 1<<4,
         LogWriteEKF3 = 1<<5,
+        UpdateFilterUKF = 1<<6,
     };
 
     enum class Event : uint8_t {
@@ -262,7 +264,7 @@ public:
             Location::AltFrame::ABSOLUTE
         };
     }
-    void handle_message(const log_RFRF &msg, NavEKF2 &ekf2, NavEKF3 &ekf3);
+    void handle_message(const log_RFRF &msg, NavEKF2 &ekf2, NavEKF3 &ekf3, NavUKF &ukf);
 
     void handle_message(const log_RISH &msg) {
         _ins.handle_message(msg);

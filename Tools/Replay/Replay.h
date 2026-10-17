@@ -58,6 +58,7 @@ public:
 
     NavEKF2 ekf2;
     NavEKF3 ekf3;
+    NavUKF ukf;
 
     SRV_Channels servo_channels;
 
@@ -100,7 +101,7 @@ private:
     const char *filename;
     ReplayVehicle &_vehicle;
 
-    LogReader reader{_vehicle.log_structure, _vehicle.ekf2, _vehicle.ekf3};
+    LogReader reader{_vehicle.log_structure, _vehicle.ekf2, _vehicle.ekf3, _vehicle.ukf};
     bool show_progress = false;  // Flag to determine if progress bar should be shown
     uint32_t last_progress_update = 0; // Last time progress was displayed
 

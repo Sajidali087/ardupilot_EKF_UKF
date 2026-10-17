@@ -38,7 +38,7 @@ void LR_MsgHandler_RFRF::process_message(uint8_t *msgbytes)
         MAP_FLAG(AP_DAL::FrameType::LogWriteEKF2, AP_DAL::FrameType::LogWriteEKF3);
     }
 #undef MAP_FLAG
-    AP::dal().handle_message(msg, ekf2, ekf3);
+    AP::dal().handle_message(msg, ekf2, ekf3, ukf);
 }
 
 void LR_MsgHandler_RFRN::process_message(uint8_t *msgbytes)

@@ -22,10 +22,11 @@
 
 extern struct user_parameter *user_parameters;
 
-LogReader::LogReader(struct LogStructure *log_structure, NavEKF2 &_ekf2, NavEKF3 &_ekf3) :
+LogReader::LogReader(struct LogStructure *log_structure, NavEKF2 &_ekf2, NavEKF3 &_ekf3, NavUKF &_ukf) :
     AP_LoggerFileReader(),
     ekf2(_ekf2),
     ekf3(_ekf3),
+    ukf(_ukf),
     _log_structure(log_structure)
 {
 }
@@ -65,7 +66,7 @@ bool LogReader::handle_log_format_msg(const struct log_Format &f)
     } else if (streq(name, "RFRH")) {
         msgparser[f.type] = NEW_NOTHROW LR_MsgHandler_RFRH(formats[f.type]);
     } else if (streq(name, "RFRF")) {
-        msgparser[f.type] = NEW_NOTHROW LR_MsgHandler_RFRF(formats[f.type], ekf2, ekf3);
+        msgparser[f.type] = NEW_NOTHROW LR_MsgHandler_RFRF(formats[f.type], ekf2, ekf3, ukf);
     } else if (streq(name, "RFRN")) {
         msgparser[f.type] = NEW_NOTHROW LR_MsgHandler_RFRN(formats[f.type]);
     } else if (streq(name, "REV2")) {

@@ -127,7 +127,7 @@ const AP_Param::GroupInfo NavUKF::var_info[] = {
 
     // @Param: BARO_DELAY
     // @DisplayName: Barometer measurement delay
-    // @Description: Delay of the barometer data relative to the IMU
+    // @Description: Delay of the barometer data relative to the IMU (measured effective delay 0-10 ms in SITL, docs/noise_table.md)
     // @Units: ms
     // @Range: 0 250
     // @User: Advanced
@@ -135,11 +135,11 @@ const AP_Param::GroupInfo NavUKF::var_info[] = {
 
     // @Param: MAG_DELAY
     // @DisplayName: Compass measurement delay
-    // @Description: Delay of the compass data relative to the IMU
+    // @Description: Delay of the compass data relative to the IMU (measured effective delay 45 ms in SITL against truth, docs/noise_table.md)
     // @Units: ms
     // @Range: 0 250
     // @User: Advanced
-    AP_GROUPINFO("MAG_DELAY", 17, NavUKF, _mag_delay_ms, 0),
+    AP_GROUPINFO("MAG_DELAY", 17, NavUKF, _mag_delay_ms, 45),
 
     // @Param: ABIAS_MAN
     // @DisplayName: Accel bias learning manoeuvre threshold

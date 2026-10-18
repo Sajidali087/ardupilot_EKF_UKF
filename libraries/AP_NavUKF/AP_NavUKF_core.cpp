@@ -36,6 +36,10 @@ static constexpr uint16_t MAX_DELAY_MS = 250;       // largest sensor delay acce
 static constexpr float MAN_TAU = 1.0f;              // s, filter of the manoeuvre measures
 static constexpr float MAN_RATE = 0.1f;             // rad/s, rotation rate that counts as manoeuvring
 
+// baro step detector (ukf_state_model.md Section 14)
+static constexpr float BARO_CUSUM_K = 1.0f;         // allowance, innovation standard deviations
+static constexpr float BARO_CUSUM_H = 50.0f;        // decision threshold
+
 static constexpr uint16_t HORIZON_MARGIN_MS = 60;   // a sample reaches the DAL up to 57 ms after its stamp (GPS; baro and compass 21 ms; S1)
 static constexpr float OUTPUT_TAU = 0.25f;          // s, output velocity and position tracking time constant (EKF3 EK3_TAU_OUTPUT default)
 
@@ -175,6 +179,9 @@ void NavUKF_core::try_initialise(const Vector3F &dAng, ftype dtA, const Vector3F
     late_count = 0;
     man_accel = 0;
     man_rate = 0;
+    baro_cusum_hi = 0;
+    baro_cusum_lo = 0;
+    baro_step_count = 0;
     abias_frozen = UKFModel::abias_frozen_axes(q, false);
     reset_output();
     memset(_nis_count, 0, sizeof(_nis_count));
@@ -290,7 +297,8 @@ bool NavUKF_core::read_mag(Vector3F &mag, uint32_t &update_us) const
     return true;
 }
 
-bool NavUKF_core::fuse(UKFModel::Meas t, uint8_t m, const ftype z[MAX_MEAS], const ftype sd[MAX_MEAS])
+bool NavUKF_core::fuse(UKFModel::Meas t, uint8_t m, const ftype z[MAX_MEAS], const ftype sd[MAX_MEAS],
+                       UpdateResult *result)
 {
     // fresh sigma points around the current estimate (ukf_state_model.md Section 4)
     if (!sigma_points(x, P, weights, chi, L, last_regularised)) {
@@ -319,7 +327,28 @@ bool NavUKF_core::fuse(UKFModel::Meas t, uint8_t m, const ftype z[MAX_MEAS], con
         }
     }
     Log_Write_Innov(uint8_t(t), res, inside);
+    if (result != nullptr) {
+        *result = res;
+    }
     return true;
+}
+
+void NavUKF_core::baro_step_check(const UpdateResult &res)
+{
+    if (res.innov_sd[0] <= 0) {
+        return;
+    }
+    const ftype r = res.innov[0] / res.innov_sd[0];
+    baro_cusum_hi = MAX(ftype(0), baro_cusum_hi + r - ftype(BARO_CUSUM_K));
+    baro_cusum_lo = MAX(ftype(0), baro_cusum_lo - r - ftype(BARO_CUSUM_K));
+    if (baro_cusum_hi > ftype(BARO_CUSUM_H) || baro_cusum_lo > ftype(BARO_CUSUM_H)) {
+        // a step, not drift: let the baro bias take it up now instead of at the drift rate.
+        // The last innovation estimates the step; adding to a diagonal element keeps P positive definite.
+        P[15][15] += sq(res.innov[0]);
+        baro_cusum_hi = 0;
+        baro_cusum_lo = 0;
+        baro_step_count++;
+    }
 }
 
 void NavUKF_core::fuse_gps(const GpsSample &g)
@@ -344,7 +373,10 @@ void NavUKF_core::fuse_baro(const BaroSample &b)
     }
     const ftype z[MAX_MEAS] = { b.alt - baro_ref, 0, 0 };
     const ftype sd[MAX_MEAS] = { frontend.meas_noise().baro, 0, 0 };
-    fuse(UKFModel::Meas::BARO, 1, z, sd);
+    UpdateResult res;
+    if (fuse(UKFModel::Meas::BARO, 1, z, sd, &res)) {
+        baro_step_check(res);
+    }
 }
 
 void NavUKF_core::fuse_yaw(const MagSample &m)
@@ -536,7 +568,7 @@ void NavUKF_core::update(void)
 #define UKF2_DEF "UKF2", "TimeUS,C,GX,GY,GZ,AX,AY,AZ,BB,WN,WE", "s#EEEooomnn", "F-000000000", "QBfffffffff"
 #define UKF3_DEF "UKF3", "TimeUS,C,SR,SP,SY,SVN,SVE,SVD,SPN,SPE,SPD,Reg,Fail", "s#dddnnnmmm--", "F-00000000000", "QBfffffffffBI"
 #define UKFD_DEF "UKFD", "TimeUS,C,Roll,Pitch,Yaw,VN,VE,VD,PN,PE,PD,Dly,Drop,Late", "s#ddhnnnmmm---", "F-000000000000", "QBfffffffffHII"
-#define UKFH_DEF "UKFH", "TimeUS,C,ABF,AH", "s#-o", "F-00", "QBBf"
+#define UKFH_DEF "UKFH", "TimeUS,C,ABF,AH,BSt,BCH,BCL", "s#-o---", "F-00000", "QBBfHff"
 #define UKFN_DEF "UKFN", "TimeUS,C,T,I0,I1,I2,S0,S1,S2,NIS,In", "s#---------", "F-000000000", "QBBfffffffB"
 
 /*
@@ -615,10 +647,11 @@ void NavUKF_core::Log_Write(void) const
                        _horizon_delay_ms, dropped_count, late_count);
 
     // @LoggerMessage: UKFH
-    // @Description: UKF shadow estimator observability and health: ABF accel bias axes not learned (bit 0 x, 1 y, 2 z); AH filtered horizontal acceleration
+    // @Description: UKF shadow estimator observability and health: ABF accel bias axes not learned (bit 0 x, 1 y, 2 z); AH filtered horizontal acceleration; BSt baro steps detected; BCH, BCL baro innovation CUSUM (high, low side)
     AP::logger().Write(UKFH_DEF,
                        time_us, core,
-                       abias_frozen, float(man_accel));
+                       abias_frozen, float(man_accel),
+                       baro_step_count, float(baro_cusum_hi), float(baro_cusum_lo));
 
     // @LoggerMessage: UKF2
     // @Description: UKF shadow estimator: gyro bias, accel bias, baro bias, wind

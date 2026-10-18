@@ -97,6 +97,11 @@ private:
     ftype man_rate;                     // filtered rotation rate, rad/s
     uint8_t abias_frozen;               // bit i: body accel bias axis i is not learned
 
+    // baro step detector (ukf_state_model.md Section 14): two-sided CUSUM of the normalised baro innovation
+    ftype baro_cusum_hi;
+    ftype baro_cusum_lo;
+    uint16_t baro_step_count;
+
     // output predictor (EKF3-style complementary tracking of the horizon state)
     ftype xout[10];                     // q, v, p at the current time
     Vector3F out_dang_corr;             // delta angle correction per IMU step, rad
@@ -158,7 +163,11 @@ private:
     void reset_output(void);
 
     // one unscented update of measurement t with fresh sigma points; logs UKFN
-    bool fuse(UKFModel::Meas t, uint8_t m, const ftype z[UKFMath::MAX_MEAS], const ftype sd[UKFMath::MAX_MEAS]);
+    bool fuse(UKFModel::Meas t, uint8_t m, const ftype z[UKFMath::MAX_MEAS], const ftype sd[UKFMath::MAX_MEAS],
+              UKFMath::UpdateResult *result = nullptr);
+
+    // CUSUM on a baro innovation; on a detected step the baro bias variance is inflated
+    void baro_step_check(const UKFMath::UpdateResult &res);
 
     // mean body-frame field of the compasses used for yaw and the newest update time; false if none
     bool read_mag(Vector3F &mag, uint32_t &update_us) const;

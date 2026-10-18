@@ -149,6 +149,14 @@ const AP_Param::GroupInfo NavUKF::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("ABIAS_MAN", 18, NavUKF, _abias_man, 1.0f),
 
+    // @Param: GPS_TOFS
+    // @DisplayName: GPS time stamp offset
+    // @Description: Offset of the GPS data time from its time stamp, added to the time of validity after the delay. Positive when the data are newer than the stamp. In SITL the u-blox driver stamps each fix about 17 ms before the data it carries (docs/noise_table.md). 0 by default; used for the matched-delay sensitivity case.
+    // @Units: ms
+    // @Range: -50 50
+    // @User: Advanced
+    AP_GROUPINFO("GPS_TOFS", 19, NavUKF, _gps_tofs_ms, 0),
+
     AP_GROUPEND
 };
 

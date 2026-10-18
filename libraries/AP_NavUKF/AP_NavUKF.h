@@ -42,6 +42,7 @@ public:
     int16_t gps_delay_ms() const { return _gps_delay_ms.get(); }
     int16_t baro_delay_ms() const { return _baro_delay_ms.get(); }
     int16_t mag_delay_ms() const { return _mag_delay_ms.get(); }
+    int16_t gps_tofs_ms() const { return _gps_tofs_ms.get(); }
 
     // horizontal acceleration above which horizontal accel bias is learned, m/s^2
     ftype abias_man() const { return _abias_man.get(); }
@@ -69,6 +70,7 @@ private:
     AP_Int16 _baro_delay_ms;    // baro delay, ms
     AP_Int16 _mag_delay_ms;     // compass delay, ms
     AP_Float _abias_man;        // accel bias learning threshold, m/s^2
+    AP_Int16 _gps_tofs_ms;      // GPS stamp offset, ms (positive: data newer than the stamp)
 
     NavUKF_core core{*this};
 

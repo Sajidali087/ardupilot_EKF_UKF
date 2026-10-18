@@ -84,7 +84,7 @@ private:
     UKFBuffer::Ring<GpsSample, OBS_BUF_LEN> gps_buf;
     UKFBuffer::Ring<BaroSample, OBS_BUF_LEN> baro_buf;
     UKFBuffer::Ring<MagSample, OBS_BUF_LEN> mag_buf;
-    uint32_t gps_delay_us;
+    int32_t gps_delay_us;               // GPS delay minus the stamp offset (negative: data newer than the stamp)
     uint32_t baro_delay_us;
     uint32_t mag_delay_us;
     uint16_t _horizon_delay_ms;

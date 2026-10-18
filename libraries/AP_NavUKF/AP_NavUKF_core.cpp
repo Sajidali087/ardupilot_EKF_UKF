@@ -32,6 +32,7 @@ static constexpr float FLOOR_SIG_POS_V = 0.35f;     // m, GPS vertical floor
 
 // delayed fusion horizon (ukf_state_model.md Section 12)
 static constexpr uint16_t MAX_DELAY_MS = 250;       // largest sensor delay accepted (EKF3 uses the same limit for the GPS)
+static constexpr int16_t MAX_TOFS_MS = 50;          // largest GPS stamp offset accepted
 // accel bias observability (ukf_state_model.md Section 13)
 static constexpr float MAN_TAU = 1.0f;              // s, filter of the manoeuvre measures
 static constexpr float MAN_RATE = 0.1f;             // rad/s, rotation rate that counts as manoeuvring
@@ -205,19 +206,22 @@ bool NavUKF_core::setup_delays(void)
     }
     const uint16_t baro_ms = MIN(uint16_t(MAX(frontend.baro_delay_ms(), int16_t(0))), MAX_DELAY_MS);
     const uint16_t mag_ms = MIN(uint16_t(MAX(frontend.mag_delay_ms(), int16_t(0))), MAX_DELAY_MS);
-    gps_delay_us = gps_ms * 1000U;
+    // GPS: the stamp offset moves the time of validity later (data newer than its stamp) or earlier
+    const int16_t tofs_ms = constrain_int16(frontend.gps_tofs_ms(), -MAX_TOFS_MS, MAX_TOFS_MS);
+    const int32_t gps_eff_ms = int32_t(gps_ms) - tofs_ms;
+    gps_delay_us = gps_eff_ms * 1000;
     baro_delay_us = baro_ms * 1000U;
     mag_delay_us = mag_ms * 1000U;
     // the horizon stays behind the time of validity of every sample still to arrive
-    _horizon_delay_ms = MAX(gps_ms, MAX(baro_ms, mag_ms)) + HORIZON_MARGIN_MS;
+    _horizon_delay_ms = MAX(uint16_t(MAX(gps_eff_ms, int32_t(0))), MAX(baro_ms, mag_ms)) + HORIZON_MARGIN_MS;
     return true;
 }
 
-// time of validity in DAL microseconds of a sample received at t_ms (DAL milliseconds)
-static uint64_t valid_from_ms(uint32_t t_ms, uint32_t delay_us)
+// time of validity in DAL microseconds of a sample received at t_ms (DAL milliseconds); delay_us may be negative
+static uint64_t valid_from_ms(uint32_t t_ms, int32_t delay_us)
 {
-    const uint64_t t_us = uint64_t(t_ms) * 1000U;
-    return t_us > delay_us ? t_us - delay_us : 0;
+    const int64_t t_us = int64_t(t_ms) * 1000 - delay_us;
+    return t_us > 0 ? uint64_t(t_us) : 0;
 }
 
 void NavUKF_core::read_sensors(void)
@@ -258,7 +262,7 @@ void NavUKF_core::read_sensors(void)
         last_baro_ms = baro.get_last_update(bi);
         BaroSample b;
         b.alt = baro.get_altitude(bi);
-        b.valid_us = valid_from_ms(last_baro_ms, baro_delay_us);
+        b.valid_us = valid_from_ms(last_baro_ms, int32_t(baro_delay_us));
         if (!baro_buf.push(b)) {
             dropped_count++;
         }

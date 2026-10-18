@@ -302,9 +302,9 @@ void Replay::loop()
 {
     if (!reader.update()) {
         // UKF stub check: how many frames reached NavUKF::UpdateFilter
-        printf("UKF: UKF_ENABLE=%d, UpdateFilter ran %u frames, initialised=%d\n",
+        printf("UKF: UKF_ENABLE=%d, UpdateFilter ran %u frames, initialised=%d, horizon delay %u ms\n",
                int(_vehicle.ukf.enabled()), unsigned(_vehicle.ukf.frame_count()),
-               int(_vehicle.ukf.initialised()));
+               int(_vehicle.ukf.initialised()), unsigned(_vehicle.ukf.horizon_delay_ms()));
         // NIS monitoring (Step 11 item 10): share of updates inside the 95 % bounds after 60 s
         const char *nis_names[] = { "GPS pos", "GPS vel", "baro", "yaw" };
         printf("UKF NIS in 95%% bounds after 60 s:");

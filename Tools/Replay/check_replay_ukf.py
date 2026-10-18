@@ -12,9 +12,12 @@ check UKF shadow estimator output in Replay logs (copy of check_replay.py with t
   check_replay_ukf.py --compare LOG_A LOG_B
       determinism: the replayed UKF messages (core >= 100) of two Replay outputs of the
       same input log must be identical, message for message
+
+  --types UKF1,UKF2,UKF3,UKFN restricts either mode to these messages (e.g. to compare
+  with a log written before UKFD existed)
 '''
 
-UKF_LIST = ['UKF1', 'UKF2', 'UKF3', 'UKFN']
+UKF_LIST = ['UKF1', 'UKF2', 'UKF3', 'UKFN', 'UKFD']
 
 
 def msg_key(m):
@@ -149,9 +152,12 @@ if __name__ == '__main__':
     parser.add_argument("--verbose", action='store_true', help="verbose output")
     parser.add_argument("--accuracy", type=float, default=0.0, help="accuracy percentage for match")
     parser.add_argument("--ignore-field", action='append', default=[], help="ignore message field when comparing")
+    parser.add_argument("--types", default=None, help="comma-separated UKF messages to check (default: all)")
     parser.add_argument("logs", metavar="LOG", nargs="+")
 
     args = parser.parse_args()
+    if args.types:
+        UKF_LIST[:] = args.types.split(',')
 
     failed = False
     if args.compare:

@@ -38,6 +38,14 @@ public:
     ftype ut_kappa() const { return _ut_kappa.get(); }
     UKFModel::MeasNoise meas_noise() const;
 
+    // sensor delays in ms; GPS -1 means the driver-reported lag
+    int16_t gps_delay_ms() const { return _gps_delay_ms.get(); }
+    int16_t baro_delay_ms() const { return _baro_delay_ms.get(); }
+    int16_t mag_delay_ms() const { return _mag_delay_ms.get(); }
+
+    // fusion horizon delay in ms chosen at initialisation
+    uint16_t horizon_delay_ms() const { return core.horizon_delay_ms(); }
+
 private:
     AP_Int8 _enable;
     AP_Float _gyr_noise;        // sigma_g, rad/s
@@ -54,6 +62,9 @@ private:
     AP_Float _baro_noise;       // baro altitude, m
     AP_Float _bbias_noise;      // sigma_bb, m per sqrt(s)
     AP_Float _yaw_noise;        // compass yaw floor, rad
+    AP_Int16 _gps_delay_ms;     // GPS delay, ms (-1: driver lag)
+    AP_Int16 _baro_delay_ms;    // baro delay, ms
+    AP_Int16 _mag_delay_ms;     // compass delay, ms
 
     NavUKF_core core{*this};
 

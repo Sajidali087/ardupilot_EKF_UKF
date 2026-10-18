@@ -117,6 +117,30 @@ const AP_Param::GroupInfo NavUKF::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("YAW_NSE", 14, NavUKF, _yaw_noise, 0.03f),
 
+    // @Param: GPS_DELAY
+    // @DisplayName: GPS measurement delay
+    // @Description: Delay of the GPS data relative to the IMU. -1 uses the lag reported by the GPS driver, the same value EKF3 uses. The UKF fuses each measurement on a delayed fusion horizon at its time of validity.
+    // @Units: ms
+    // @Range: -1 250
+    // @User: Advanced
+    AP_GROUPINFO("GPS_DELAY", 15, NavUKF, _gps_delay_ms, -1),
+
+    // @Param: BARO_DELAY
+    // @DisplayName: Barometer measurement delay
+    // @Description: Delay of the barometer data relative to the IMU
+    // @Units: ms
+    // @Range: 0 250
+    // @User: Advanced
+    AP_GROUPINFO("BARO_DELAY", 16, NavUKF, _baro_delay_ms, 0),
+
+    // @Param: MAG_DELAY
+    // @DisplayName: Compass measurement delay
+    // @Description: Delay of the compass data relative to the IMU
+    // @Units: ms
+    // @Range: 0 250
+    // @User: Advanced
+    AP_GROUPINFO("MAG_DELAY", 17, NavUKF, _mag_delay_ms, 0),
+
     AP_GROUPEND
 };
 

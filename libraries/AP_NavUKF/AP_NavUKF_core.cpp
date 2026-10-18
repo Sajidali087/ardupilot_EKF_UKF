@@ -29,6 +29,11 @@ static constexpr float FLOOR_SIG_VEL = 0.1f;        // m/s, GPS velocity floor
 static constexpr float FLOOR_SIG_POS_H = 0.5f;      // m, GPS horizontal floor
 static constexpr float FLOOR_SIG_POS_V = 0.35f;     // m, GPS vertical floor
 
+// delayed fusion horizon (ukf_state_model.md Section 12)
+static constexpr uint16_t MAX_DELAY_MS = 250;       // largest sensor delay accepted (EKF3 uses the same limit for the GPS)
+static constexpr uint16_t HORIZON_MARGIN_MS = 60;   // a sample reaches the DAL up to 57 ms after its stamp (GPS; baro and compass 21 ms; S1)
+static constexpr float OUTPUT_TAU = 0.25f;          // s, output velocity and position tracking time constant (EKF3 EK3_TAU_OUTPUT default)
+
 bool NavUKF_core::read_imu(Vector3F &dAng, ftype &dtA, Vector3F &dVel, ftype &dtV) const
 {
     const auto &ins = AP::dal().ins();
@@ -81,6 +86,11 @@ void NavUKF_core::try_initialise(const Vector3F &dAng, ftype dtA, const Vector3F
     const auto &gps = AP::dal().gps();
     const uint8_t gi = gps.primary_sensor();
     if (gps.status(gi) < AP_DAL_GPS::GPS_OK_FIX_3D) {
+        return;
+    }
+
+    // sensor delays (the driver-reported GPS lag is known once the receiver is configured)
+    if (!setup_delays()) {
         return;
     }
 
@@ -149,9 +159,107 @@ void NavUKF_core::try_initialise(const Vector3F &dAng, ftype dtA, const Vector3F
     last_regularised = 0;
     sigma_fail_count = 0;
     init_time_us = AP::dal().micros64();
+
+    // the state is valid now; the horizon falls behind while the IMU buffer fills
+    horizon_us = init_time_us;
+    imu_buf.reset();
+    gps_buf.reset();
+    baro_buf.reset();
+    mag_buf.reset();
+    dropped_count = 0;
+    late_count = 0;
+    reset_output();
     memset(_nis_count, 0, sizeof(_nis_count));
     memset(_nis_inside, 0, sizeof(_nis_inside));
     _initialised = true;
+}
+
+bool NavUKF_core::setup_delays(void)
+{
+    uint16_t gps_ms;
+    if (frontend.gps_delay_ms() < 0) {
+        // same lag EKF3 uses (AP_NavEKF3_Measurements.cpp readGpsData)
+        float lag_s = 0;
+        const auto &gps = AP::dal().gps();
+        if (!gps.get_lag(gps.primary_sensor(), lag_s)) {
+            return false;
+        }
+        gps_ms = MIN(uint16_t(lag_s * 1000.0f + 0.5f), MAX_DELAY_MS);
+    } else {
+        gps_ms = MIN(uint16_t(frontend.gps_delay_ms()), MAX_DELAY_MS);
+    }
+    const uint16_t baro_ms = MIN(uint16_t(MAX(frontend.baro_delay_ms(), int16_t(0))), MAX_DELAY_MS);
+    const uint16_t mag_ms = MIN(uint16_t(MAX(frontend.mag_delay_ms(), int16_t(0))), MAX_DELAY_MS);
+    gps_delay_us = gps_ms * 1000U;
+    baro_delay_us = baro_ms * 1000U;
+    mag_delay_us = mag_ms * 1000U;
+    // the horizon stays behind the time of validity of every sample still to arrive
+    _horizon_delay_ms = MAX(gps_ms, MAX(baro_ms, mag_ms)) + HORIZON_MARGIN_MS;
+    return true;
+}
+
+// time of validity in DAL microseconds of a sample received at t_ms (DAL milliseconds)
+static uint64_t valid_from_ms(uint32_t t_ms, uint32_t delay_us)
+{
+    const uint64_t t_us = uint64_t(t_ms) * 1000U;
+    return t_us > delay_us ? t_us - delay_us : 0;
+}
+
+void NavUKF_core::read_sensors(void)
+{
+    const uint64_t now_us = AP::dal().micros64();
+
+    // GPS: new fix on the primary receiver
+    const auto &gps = AP::dal().gps();
+    const uint8_t gi = gps.primary_sensor();
+    if (gps.status(gi) >= AP_DAL_GPS::GPS_OK_FIX_3D && gps.last_message_time_ms(gi) != last_gps_ms) {
+        last_gps_ms = gps.last_message_time_ms(gi);
+        const UKFModel::MeasNoise r = frontend.meas_noise();
+        float h_acc = 0, v_acc = 0, s_acc = 0;
+        GpsSample g;
+        g.sd_pos_h = gps.horizontal_accuracy(gi, h_acc) ? MAX(ftype(h_acc), r.gps_pos_h) : r.gps_pos_h;
+        g.sd_pos_v = gps.vertical_accuracy(gi, v_acc) ? MAX(ftype(v_acc), r.gps_pos_v) : r.gps_pos_v;
+        g.sd_vel = gps.speed_accuracy(gi, s_acc) ? MAX(ftype(s_acc), r.gps_vel) : r.gps_vel;
+        // position: NED offset of the GPS location from the origin (no lever arm)
+        const Vector3d d = origin.get_distance_NED_double(gps.location(gi));
+        g.pos[0] = d.x;
+        g.pos[1] = d.y;
+        g.pos[2] = d.z;
+        const Vector3F v = gps.velocity(gi).toftype();
+        g.vel[0] = v.x;
+        g.vel[1] = v.y;
+        g.vel[2] = v.z;
+        g.have_vz = gps.have_vertical_velocity(gi);
+        g.valid_us = valid_from_ms(last_gps_ms, gps_delay_us);
+        if (!gps_buf.push(g)) {
+            dropped_count++;
+        }
+    }
+
+    // baro: new sample of the primary barometer
+    const auto &baro = AP::dal().baro();
+    const uint8_t bi = baro.get_primary();
+    if (baro.healthy(bi) && baro.get_last_update(bi) != last_baro_ms) {
+        last_baro_ms = baro.get_last_update(bi);
+        BaroSample b;
+        b.alt = baro.get_altitude(bi);
+        b.valid_us = valid_from_ms(last_baro_ms, baro_delay_us);
+        if (!baro_buf.push(b)) {
+            dropped_count++;
+        }
+    }
+
+    // compass: new mean field of the yaw compasses (32-bit microsecond stamp, converted wrap-safe)
+    MagSample m;
+    uint32_t t_us;
+    if (read_mag(m.field, t_us) && t_us != last_mag_us) {
+        last_mag_us = t_us;
+        const uint64_t t64 = now_us - uint32_t(uint32_t(now_us) - t_us);
+        m.valid_us = t64 > mag_delay_us ? t64 - mag_delay_us : 0;
+        if (!mag_buf.push(m)) {
+            dropped_count++;
+        }
+    }
 }
 
 bool NavUKF_core::read_mag(Vector3F &mag, uint32_t &update_us) const
@@ -206,77 +314,140 @@ bool NavUKF_core::fuse(UKFModel::Meas t, uint8_t m, const ftype z[MAX_MEAS], con
     return true;
 }
 
-void NavUKF_core::fuse_gps(void)
+void NavUKF_core::fuse_gps(const GpsSample &g)
 {
-    const auto &gps = AP::dal().gps();
-    const uint8_t gi = gps.primary_sensor();
-    if (gps.status(gi) < AP_DAL_GPS::GPS_OK_FIX_3D) {
-        return;
-    }
-    const uint32_t t_ms = gps.last_message_time_ms(gi);
-    if (t_ms == last_gps_ms) {
-        return;
-    }
-    last_gps_ms = t_ms;
-
-    const UKFModel::MeasNoise r = frontend.meas_noise();
-    float h_acc = 0, v_acc = 0, s_acc = 0;
-    const ftype sh = gps.horizontal_accuracy(gi, h_acc) ? MAX(ftype(h_acc), r.gps_pos_h) : r.gps_pos_h;
-    const ftype sv = gps.vertical_accuracy(gi, v_acc) ? MAX(ftype(v_acc), r.gps_pos_v) : r.gps_pos_v;
-    const ftype ss = gps.speed_accuracy(gi, s_acc) ? MAX(ftype(s_acc), r.gps_vel) : r.gps_vel;
-
-    // position: NED offset of the GPS location from the origin (no lever arm, no delay compensation)
-    const Vector3d d = origin.get_distance_NED_double(gps.location(gi));
-    const ftype zp[MAX_MEAS] = { ftype(d.x), ftype(d.y), ftype(d.z) };
-    const ftype sp[MAX_MEAS] = { sh, sh, sv };
+    const ftype zp[MAX_MEAS] = { g.pos[0], g.pos[1], g.pos[2] };
+    const ftype sp[MAX_MEAS] = { g.sd_pos_h, g.sd_pos_h, g.sd_pos_v };
     fuse(UKFModel::Meas::GPS_POS, 3, zp, sp);
 
     // velocity, vertical only if the receiver provides it
-    const Vector3F v = gps.velocity(gi).toftype();
-    const ftype zv[MAX_MEAS] = { v.x, v.y, v.z };
-    const ftype sdv[MAX_MEAS] = { ss, ss, ss };
-    fuse(UKFModel::Meas::GPS_VEL, gps.have_vertical_velocity(gi) ? 3 : 2, zv, sdv);
+    const ftype zv[MAX_MEAS] = { g.vel[0], g.vel[1], g.vel[2] };
+    const ftype sdv[MAX_MEAS] = { g.sd_vel, g.sd_vel, g.sd_vel };
+    fuse(UKFModel::Meas::GPS_VEL, g.have_vz ? 3 : 2, zv, sdv);
 }
 
-void NavUKF_core::fuse_baro(void)
+void NavUKF_core::fuse_baro(const BaroSample &b)
 {
-    const auto &baro = AP::dal().baro();
-    const uint8_t bi = baro.get_primary();
-    if (!baro.healthy(bi)) {
-        return;
-    }
-    const uint32_t t_ms = baro.get_last_update(bi);
-    if (t_ms == last_baro_ms) {
-        return;
-    }
-    last_baro_ms = t_ms;
     if (!have_baro_ref) {
         // baro was not healthy at initialisation: reference so that b_baro starts at 0
-        baro_ref = baro.get_altitude(bi) + x[9];
+        baro_ref = b.alt + x[9];
         have_baro_ref = true;
         return;
     }
-    const ftype z[MAX_MEAS] = { ftype(baro.get_altitude(bi)) - baro_ref, 0, 0 };
+    const ftype z[MAX_MEAS] = { b.alt - baro_ref, 0, 0 };
     const ftype sd[MAX_MEAS] = { frontend.meas_noise().baro, 0, 0 };
     fuse(UKFModel::Meas::BARO, 1, z, sd);
 }
 
-void NavUKF_core::fuse_yaw(void)
+void NavUKF_core::fuse_yaw(const MagSample &m)
 {
-    Vector3F mag;
-    uint32_t t_us;
-    if (!read_mag(mag, t_us) || t_us == last_mag_us) {
-        return;
-    }
-    last_mag_us = t_us;
-
-    // tilt compensation with the current estimate (ukf_state_model.md 5.1)
+    // tilt compensation with the horizon estimate (ukf_state_model.md 5.1)
     const QuaternionF q(x[0], x[1], x[2], x[3]);
-    const ftype yaw = UKFModel::yaw_from_mag(mag, q.get_euler_roll(), q.get_euler_pitch(),
+    const ftype yaw = UKFModel::yaw_from_mag(m.field, q.get_euler_roll(), q.get_euler_pitch(),
                                              AP::dal().compass().get_declination());
     const ftype z[MAX_MEAS] = { yaw, 0, 0 };
     const ftype sd[MAX_MEAS] = { frontend.meas_noise().yaw, 0, 0 };
     fuse(UKFModel::Meas::YAW, 1, z, sd);
+}
+
+void NavUKF_core::count_late(uint64_t valid_us, uint32_t half_dt_us)
+{
+    if (horizon_us > valid_us + 3 * half_dt_us) {
+        // the horizon had passed its time of validity by more than 1.5 steps: it arrived too late
+        late_count++;
+    }
+}
+
+void NavUKF_core::fuse_due(uint32_t half_dt_us)
+{
+    // same order as Part 1: GPS position and velocity, baro, yaw
+    while (!gps_buf.empty() && UKFBuffer::meas_due(gps_buf.oldest().valid_us, horizon_us, half_dt_us)) {
+        count_late(gps_buf.oldest().valid_us, half_dt_us);
+        fuse_gps(gps_buf.oldest());
+        gps_buf.pop();
+    }
+    while (!baro_buf.empty() && UKFBuffer::meas_due(baro_buf.oldest().valid_us, horizon_us, half_dt_us)) {
+        count_late(baro_buf.oldest().valid_us, half_dt_us);
+        fuse_baro(baro_buf.oldest());
+        baro_buf.pop();
+    }
+    while (!mag_buf.empty() && UKFBuffer::meas_due(mag_buf.oldest().valid_us, horizon_us, half_dt_us)) {
+        count_late(mag_buf.oldest().valid_us, half_dt_us);
+        fuse_yaw(mag_buf.oldest());
+        mag_buf.pop();
+    }
+}
+
+void NavUKF_core::reset_output(void)
+{
+    memcpy(xout, x, sizeof(xout));
+    out_dang_corr.zero();
+    out_vel_int.zero();
+    out_pos_int.zero();
+}
+
+void NavUKF_core::predict_output(const Vector3F &dAng, ftype dtA, const Vector3F &dVel, ftype dtV)
+{
+    // strapdown step of the output state with the horizon biases and the tracking correction
+    ftype xo[NUM_STATES];
+    memcpy(xo, xout, sizeof(xout));
+    memcpy(&xo[10], &x[10], sizeof(ftype) * (NUM_STATES - 10));
+    UKFModel::predict_state(xo, dAng + out_dang_corr, dtA, dVel, dtV, xo);
+    memcpy(xout, xo, sizeof(xout));
+}
+
+void NavUKF_core::correct_output(const ImuSample &d)
+{
+    const ftype dt = d.dtV;
+
+    // attitude error in the body frame of the output at the horizon time
+    const QuaternionF qo(d.out[0], d.out[1], d.out[2], d.out[3]);
+    const QuaternionF qh(x[0], x[1], x[2], x[3]);
+    QuaternionF qe = qo.inverse() * qh;
+    qe.normalize();
+    const ftype sgn = qe.q1 >= 0 ? ftype(2) : ftype(-2);
+    const Vector3F ang_err(sgn * qe.q2, sgn * qe.q3, sgn * qe.q4);
+
+    // gain for a damping ratio of about 0.7 at this delay (EKF3 calcOutputStates)
+    const ftype delay = MAX(ftype(AP::dal().micros64() - horizon_us) * ftype(1.0e-6), dt);
+    out_dang_corr = ang_err * (ftype(0.5) / delay) * dt;
+
+    // velocity and position: PI tracking with time constant OUTPUT_TAU
+    const Vector3F vel_err(x[4] - d.out[4], x[5] - d.out[5], x[6] - d.out[6]);
+    const Vector3F pos_err(x[7] - d.out[7], x[8] - d.out[8], x[9] - d.out[9]);
+    const ftype gain = dt / constrain_ftype(ftype(OUTPUT_TAU), dt, ftype(10));
+    out_vel_int += vel_err;
+    out_pos_int += pos_err;
+    const Vector3F vel_corr = vel_err * gain + out_vel_int * (sq(gain) * ftype(0.1));
+    const Vector3F pos_corr = pos_err * gain + out_pos_int * (sq(gain) * ftype(0.1));
+
+    // apply to the whole output history after the horizon and to the current output
+    for (uint8_t i = 0; i < imu_buf.size(); i++) {
+        ftype *o = imu_buf[i].out;
+        for (uint8_t k = 0; k < 3; k++) {
+            o[4 + k] += vel_corr[k];
+            o[7 + k] += pos_corr[k];
+        }
+    }
+    for (uint8_t k = 0; k < 3; k++) {
+        xout[4 + k] += vel_corr[k];
+        xout[7 + k] += pos_corr[k];
+    }
+}
+
+void NavUKF_core::advance_horizon(void)
+{
+    const ImuSample s = imu_buf.oldest();
+    imu_buf.pop();
+    predict(s.dAng, s.dtA, s.dVel, s.dtV);
+    horizon_us = s.time_us;
+    fuse_due(uint32_t(s.dtV * ftype(0.5e6)));
+    if (imu_buf.empty()) {
+        // zero delay: the output is the horizon state
+        reset_output();
+    } else {
+        correct_output(s);
+    }
 }
 
 void NavUKF_core::predict(const Vector3F &dAng, ftype dtA, const Vector3F &dVel, ftype dtV)
@@ -308,10 +479,31 @@ void NavUKF_core::update(void)
         }
         return;
     }
-    predict(dAng, dtA, dVel, dtV);
-    fuse_gps();
-    fuse_baro();
-    fuse_yaw();
+    const uint64_t now_us = AP::dal().micros64();
+
+    // output at the current time, then the sample into the buffer with that output
+    predict_output(dAng, dtA, dVel, dtV);
+    if (imu_buf.full()) {
+        // never drop an IMU sample: bring the horizon forward first
+        advance_horizon();
+    }
+    ImuSample s;
+    s.dAng = dAng;
+    s.dVel = dVel;
+    s.dtA = dtA;
+    s.dtV = dtV;
+    s.time_us = now_us;
+    memcpy(s.out, xout, sizeof(s.out));
+    imu_buf.push(s);
+
+    read_sensors();
+
+    // move the horizon to now minus the delay, fusing each measurement at its time of validity
+    const uint32_t half_dt_us = uint32_t(dtV * ftype(0.5e6));
+    while (!imu_buf.empty() &&
+           UKFBuffer::imu_reached_horizon(imu_buf.oldest().time_us, now_us, _horizon_delay_ms * 1000U, half_dt_us)) {
+        advance_horizon();
+    }
     Log_Write();
 }
 
@@ -320,6 +512,7 @@ void NavUKF_core::update(void)
 #define UKF1_DEF "UKF1", "TimeUS,C,Roll,Pitch,Yaw,VN,VE,VD,PN,PE,PD", "s#ddhnnnmmm", "F-000000000", "QBfffffffff"
 #define UKF2_DEF "UKF2", "TimeUS,C,GX,GY,GZ,AX,AY,AZ,BB,WN,WE", "s#EEEooomnn", "F-000000000", "QBfffffffff"
 #define UKF3_DEF "UKF3", "TimeUS,C,SR,SP,SY,SVN,SVE,SVD,SPN,SPE,SPD,Reg,Fail", "s#dddnnnmmm--", "F-00000000000", "QBfffffffffBI"
+#define UKFD_DEF "UKFD", "TimeUS,C,Roll,Pitch,Yaw,VN,VE,VD,PN,PE,PD,Dly,Drop,Late", "s#ddhnnnmmm---", "F-000000000000", "QBfffffffffHII"
 #define UKFN_DEF "UKFN", "TimeUS,C,T,I0,I1,I2,S0,S1,S2,NIS,In", "s#---------", "F-000000000", "QBBfffffffB"
 
 /*
@@ -368,20 +561,33 @@ void NavUKF_core::Log_Write(void) const
     emit_fmt_in_replay(UKF1_DEF);
     emit_fmt_in_replay(UKF2_DEF);
     emit_fmt_in_replay(UKF3_DEF);
+    emit_fmt_in_replay(UKFD_DEF);
 
     const uint64_t time_us = AP::dal().micros64();
     const uint8_t core = DAL_CORE(0);
+    const QuaternionF qo(xout[0], xout[1], xout[2], xout[3]);
     const QuaternionF q(x[0], x[1], x[2], x[3]);
 
     // @LoggerMessage: UKF1
-    // @Description: UKF shadow estimator: attitude, velocity, position (NED from the first GPS fix)
+    // @Description: UKF shadow estimator output at the current time: attitude, velocity, position (NED from the first GPS fix)
     AP::logger().Write(UKF1_DEF,
+                       time_us, core,
+                       float(degrees(qo.get_euler_roll())),
+                       float(degrees(qo.get_euler_pitch())),
+                       float(wrap_360(degrees(qo.get_euler_yaw()))),
+                       float(xout[4]), float(xout[5]), float(xout[6]),
+                       float(xout[7]), float(xout[8]), float(xout[9]));
+
+    // @LoggerMessage: UKFD
+    // @Description: UKF shadow estimator state at the delayed fusion horizon: attitude, velocity, position; horizon delay (ms); buffered samples lost; measurements fused more than 1.5 steps after their time of validity
+    AP::logger().Write(UKFD_DEF,
                        time_us, core,
                        float(degrees(q.get_euler_roll())),
                        float(degrees(q.get_euler_pitch())),
                        float(wrap_360(degrees(q.get_euler_yaw()))),
                        float(x[4]), float(x[5]), float(x[6]),
-                       float(x[7]), float(x[8]), float(x[9]));
+                       float(x[7]), float(x[8]), float(x[9]),
+                       _horizon_delay_ms, dropped_count, late_count);
 
     // @LoggerMessage: UKF2
     // @Description: UKF shadow estimator: gyro bias, accel bias, baro bias, wind

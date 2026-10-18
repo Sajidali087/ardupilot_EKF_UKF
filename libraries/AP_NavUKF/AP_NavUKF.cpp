@@ -141,6 +141,14 @@ const AP_Param::GroupInfo NavUKF::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("MAG_DELAY", 17, NavUKF, _mag_delay_ms, 0),
 
+    // @Param: ABIAS_MAN
+    // @DisplayName: Accel bias learning manoeuvre threshold
+    // @Description: Horizontal accel bias is learned only while the filtered horizontal acceleration exceeds this value or the turn rate exceeds 0.1 rad/s; otherwise the body axes that are not near vertical keep their accel bias estimate (tilt and horizontal accel bias cannot be told apart at rest or in steady flight)
+    // @Units: m/s/s
+    // @Range: 0.0 10.0
+    // @User: Advanced
+    AP_GROUPINFO("ABIAS_MAN", 18, NavUKF, _abias_man, 1.0f),
+
     AP_GROUPEND
 };
 

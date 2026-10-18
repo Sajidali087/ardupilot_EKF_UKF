@@ -172,6 +172,27 @@ TEST(UKFModel, ProcessNoiseDiagonal)
     EXPECT_NEAR(off, 0, 0);
 }
 
+TEST(UKFModel, AccelBiasFreezeAndProcessNoise)
+{
+    QuaternionF q;
+    // level: body x and y horizontal, frozen; z vertical, learned
+    q.from_euler(ftype(0.1), ftype(-0.1), ftype(2.0));
+    EXPECT_EQ(abias_frozen_axes(q, false), 0x3);
+    EXPECT_EQ(abias_frozen_axes(q, true), 0);
+    // nose straight down: body x vertical, y and z horizontal
+    q.from_euler(0, -HALF_PI, ftype(1.0));
+    EXPECT_EQ(abias_frozen_axes(q, false), 0x6);
+    // frozen axes get no accel bias process noise
+    static ftype P[NUM_ERR][NUM_ERR];
+    memset(P, 0, sizeof(P));
+    ProcessNoise pn { ftype(3.9e-4), ftype(1.1e-3), ftype(1e-4), ftype(1e-3), ftype(0.028), ftype(0.1) };
+    const ftype dt = ftype(0.02);
+    add_process_noise(P, pn, dt, dt, 0x3);
+    EXPECT_NEAR(P[12][12], 0, 0);
+    EXPECT_NEAR(P[13][13], 0, 0);
+    EXPECT_NEAR(P[14][14], pn.accel_bias * pn.accel_bias * dt, TOL * TOL);
+}
+
 TEST(UKFModel, NisBounds)
 {
     // two-sided 95 % chi-square bounds (ukf_state_model.md Section 8)

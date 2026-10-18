@@ -456,6 +456,88 @@ TEST(UKFMath, UpdateLinearMatchesKalman)
     }
 }
 
+TEST(UKFMath, UpdateConsiderStatesMatchSchmidt)
+{
+    // GPS-like velocity measurement with the horizontal accel bias error states 12, 13 frozen:
+    // equals the Schmidt (consider) Kalman update P - K Pzx - Pxz K^T + K S K^T with zero gain rows
+    static ftype x[NUM_STATES], P[NUM_ERR][NUM_ERR], L[NUM_ERR][NUM_ERR], chi[NUM_SIGMA][NUM_STATES];
+    static ftype Z[NUM_SIGMA][MAX_MEAS], Pk[NUM_ERR][NUM_ERR], P0[NUM_ERR][NUM_ERR];
+    Weights w;
+    ASSERT_TRUE(compute_weights(1, 2, 0, NUM_ERR, w));
+    random_state(x);
+    random_spd(P, SIG);
+    memcpy(P0, P, sizeof(P));
+    uint8_t reg;
+    ASSERT_TRUE(sigma_points(x, P, w, chi, L, reg));
+    for (uint8_t i = 0; i < NUM_SIGMA; i++) {
+        for (uint8_t j = 0; j < 3; j++) {
+            Z[i][j] = chi[i][4 + j];
+        }
+    }
+    const ftype z[MAX_MEAS] = { x[4] + ftype(0.5), x[5] - ftype(0.3), x[6] + ftype(0.2) };
+    const ftype R[MAX_MEAS] = { ftype(0.01), ftype(0.01), ftype(0.01) };
+    const uint32_t frozen = (1UL << 12) | (1UL << 13);
+
+    // reference: H selects error states 3..5
+    ftype S[3][3], Sinv[3][3], K[NUM_ERR][3];
+    for (uint8_t a = 0; a < 3; a++) {
+        for (uint8_t b = 0; b < 3; b++) {
+            S[a][b] = P[3 + a][3 + b] + ((a == b) ? R[a] : 0);
+        }
+    }
+    const ftype det = S[0][0] * (S[1][1] * S[2][2] - S[1][2] * S[2][1])
+                    - S[0][1] * (S[1][0] * S[2][2] - S[1][2] * S[2][0])
+                    + S[0][2] * (S[1][0] * S[2][1] - S[1][1] * S[2][0]);
+    for (uint8_t a = 0; a < 3; a++) {
+        for (uint8_t b = 0; b < 3; b++) {
+            const uint8_t r1 = (b + 1) % 3, r2 = (b + 2) % 3, c1 = (a + 1) % 3, c2 = (a + 2) % 3;
+            Sinv[a][b] = (S[r1][c1] * S[r2][c2] - S[r1][c2] * S[r2][c1]) / det;
+        }
+    }
+    for (uint8_t r = 0; r < NUM_ERR; r++) {
+        for (uint8_t b = 0; b < 3; b++) {
+            ftype s = 0;
+            if (!(frozen & (1UL << r))) {
+                for (uint8_t k = 0; k < 3; k++) {
+                    s += P[r][3 + k] * Sinv[k][b];
+                }
+            }
+            K[r][b] = s;
+        }
+    }
+    for (uint8_t r = 0; r < NUM_ERR; r++) {
+        for (uint8_t c = 0; c < NUM_ERR; c++) {
+            ftype kpzx = 0, pxzk = 0, ksk = 0;
+            for (uint8_t a = 0; a < 3; a++) {
+                kpzx += K[r][a] * P[3 + a][c];
+                pxzk += P[r][3 + a] * K[c][a];
+                for (uint8_t b = 0; b < 3; b++) {
+                    ksk += K[r][a] * S[a][b] * K[c][b];
+                }
+            }
+            Pk[r][c] = P[r][c] - kpzx - pxzk + ksk;
+        }
+    }
+
+    ftype xprior[NUM_STATES];
+    memcpy(xprior, x, sizeof(x));
+    UpdateResult res;
+    ASSERT_TRUE(unscented_update(x, P, w, chi, Z, 3, z, R, 0, res, frozen));
+    // frozen estimates and their covariance block unchanged
+    EXPECT_EQ(memcmp(&x[13], &xprior[13], 2 * sizeof(ftype)), 0);
+    EXPECT_EQ(memcmp(&P[12][12], &P0[12][12], 2 * sizeof(ftype)), 0);
+    EXPECT_EQ(memcmp(&P[13][12], &P0[13][12], 2 * sizeof(ftype)), 0);
+    // the rest equals the Schmidt update, and P stays positive definite
+    const ftype scale = max_abs(&Pk[0][0], NUM_ERR * NUM_ERR);
+    for (uint8_t r = 0; r < NUM_ERR; r++) {
+        for (uint8_t c = 0; c < NUM_ERR; c++) {
+            EXPECT_NEAR(P[r][c], Pk[r][c], TOL * scale);
+        }
+    }
+    static ftype Lp[NUM_ERR * NUM_ERR];
+    EXPECT_TRUE(cholesky(&P[0][0], Lp, NUM_ERR));
+}
+
 TEST(UKFMath, UpdateYawWrapsAtPi)
 {
     // estimate yaw +179 deg, measurement -179 deg: innovation is +2 deg, not -358 deg

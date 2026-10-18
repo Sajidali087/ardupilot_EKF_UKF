@@ -22,7 +22,8 @@ static constexpr float ALIGN_GYRO_MAX = 0.1f;       // mean rotation rate allowe
 static constexpr float INIT_SIG_TILT = 0.05f;       // rad
 static constexpr float INIT_SIG_YAW = 0.1f;         // rad, max(syaw = 0.05, 0.1)
 static constexpr float INIT_SIG_GYRO_BIAS = 0.05f;  // rad/s
-static constexpr float INIT_SIG_ACCEL_BIAS = 0.5f;  // m/s^2
+static constexpr float INIT_SIG_ACCEL_BIAS_XY = 0.05f;  // m/s^2, body x and y (50 x the 0.001 m/s^2 static offset, noise_table.md)
+static constexpr float INIT_SIG_ACCEL_BIAS_Z = 0.5f;    // m/s^2, body z (observable against GPS and baro height)
 static constexpr float INIT_SIG_BARO_BIAS = 1.0f;   // m
 static constexpr float INIT_SIG_WIND = 5.0f;        // m/s
 static constexpr float FLOOR_SIG_VEL = 0.1f;        // m/s, GPS velocity floor
@@ -31,6 +32,10 @@ static constexpr float FLOOR_SIG_POS_V = 0.35f;     // m, GPS vertical floor
 
 // delayed fusion horizon (ukf_state_model.md Section 12)
 static constexpr uint16_t MAX_DELAY_MS = 250;       // largest sensor delay accepted (EKF3 uses the same limit for the GPS)
+// accel bias observability (ukf_state_model.md Section 13)
+static constexpr float MAN_TAU = 1.0f;              // s, filter of the manoeuvre measures
+static constexpr float MAN_RATE = 0.1f;             // rad/s, rotation rate that counts as manoeuvring
+
 static constexpr uint16_t HORIZON_MARGIN_MS = 60;   // a sample reaches the DAL up to 57 ms after its stamp (GPS; baro and compass 21 ms; S1)
 static constexpr float OUTPUT_TAU = 0.25f;          // s, output velocity and position tracking time constant (EKF3 EK3_TAU_OUTPUT default)
 
@@ -132,7 +137,7 @@ void NavUKF_core::try_initialise(const Vector3F &dAng, ftype dtA, const Vector3F
         sig_v, sig_v, sig_v,
         sig_ph, sig_ph, sig_pv,
         INIT_SIG_GYRO_BIAS, INIT_SIG_GYRO_BIAS, INIT_SIG_GYRO_BIAS,
-        INIT_SIG_ACCEL_BIAS, INIT_SIG_ACCEL_BIAS, INIT_SIG_ACCEL_BIAS,
+        INIT_SIG_ACCEL_BIAS_XY, INIT_SIG_ACCEL_BIAS_XY, INIT_SIG_ACCEL_BIAS_Z,
         INIT_SIG_BARO_BIAS,
         INIT_SIG_WIND, INIT_SIG_WIND,
     };
@@ -168,6 +173,9 @@ void NavUKF_core::try_initialise(const Vector3F &dAng, ftype dtA, const Vector3F
     mag_buf.reset();
     dropped_count = 0;
     late_count = 0;
+    man_accel = 0;
+    man_rate = 0;
+    abias_frozen = UKFModel::abias_frozen_axes(q, false);
     reset_output();
     memset(_nis_count, 0, sizeof(_nis_count));
     memset(_nis_inside, 0, sizeof(_nis_inside));
@@ -299,7 +307,7 @@ bool NavUKF_core::fuse(UKFModel::Meas t, uint8_t m, const ftype z[MAX_MEAS], con
     }
     const uint8_t angle_mask = (t == UKFModel::Meas::YAW) ? 1 : 0;
     UpdateResult res;
-    if (!unscented_update(x, P, weights, chi, Z, m, z, R, angle_mask, res)) {
+    if (!unscented_update(x, P, weights, chi, Z, m, z, R, angle_mask, res, uint32_t(abias_frozen) << 12)) {
         sigma_fail_count++;
         return false;
     }
@@ -450,8 +458,23 @@ void NavUKF_core::advance_horizon(void)
     }
 }
 
+void NavUKF_core::update_abias_learning(const Vector3F &dAng, ftype dtA, const Vector3F &dVel, ftype dtV)
+{
+    // horizontal acceleration and rotation rate at the horizon, bias-corrected, low-pass filtered
+    const QuaternionF q(x[0], x[1], x[2], x[3]);
+    const Vector3F f_body = dVel / dtV - Vector3F(x[13], x[14], x[15]);
+    const Vector3F a_ned = q * f_body + Vector3F(0, 0, ftype(UKFModel::GRAVITY_NED_D));
+    const Vector3F rate = dAng / dtA - Vector3F(x[10], x[11], x[12]);
+    const ftype k = MIN(dtV / ftype(MAN_TAU), ftype(1));
+    man_accel += (a_ned.xy().length() - man_accel) * k;
+    man_rate += (rate.length() - man_rate) * k;
+    const bool manoeuvring = man_accel > frontend.abias_man() || man_rate > ftype(MAN_RATE);
+    abias_frozen = UKFModel::abias_frozen_axes(q, manoeuvring);
+}
+
 void NavUKF_core::predict(const Vector3F &dAng, ftype dtA, const Vector3F &dVel, ftype dtV)
 {
+    update_abias_learning(dAng, dtA, dVel, dtV);
     if (!sigma_points(x, P, weights, chi, L, last_regularised)) {
         // P not factorizable: keep the state, skip this step
         sigma_fail_count++;
@@ -462,7 +485,7 @@ void NavUKF_core::predict(const Vector3F &dAng, ftype dtA, const Vector3F &dVel,
     }
     unscented_mean(chi, weights, x);
     unscented_covariance(chi, x, weights, P);
-    UKFModel::add_process_noise(P, frontend.process_noise(), dtA, dtV);
+    UKFModel::add_process_noise(P, frontend.process_noise(), dtA, dtV, abias_frozen);
 }
 
 void NavUKF_core::update(void)
@@ -513,6 +536,7 @@ void NavUKF_core::update(void)
 #define UKF2_DEF "UKF2", "TimeUS,C,GX,GY,GZ,AX,AY,AZ,BB,WN,WE", "s#EEEooomnn", "F-000000000", "QBfffffffff"
 #define UKF3_DEF "UKF3", "TimeUS,C,SR,SP,SY,SVN,SVE,SVD,SPN,SPE,SPD,Reg,Fail", "s#dddnnnmmm--", "F-00000000000", "QBfffffffffBI"
 #define UKFD_DEF "UKFD", "TimeUS,C,Roll,Pitch,Yaw,VN,VE,VD,PN,PE,PD,Dly,Drop,Late", "s#ddhnnnmmm---", "F-000000000000", "QBfffffffffHII"
+#define UKFH_DEF "UKFH", "TimeUS,C,ABF,AH", "s#-o", "F-00", "QBBf"
 #define UKFN_DEF "UKFN", "TimeUS,C,T,I0,I1,I2,S0,S1,S2,NIS,In", "s#---------", "F-000000000", "QBBfffffffB"
 
 /*
@@ -562,6 +586,7 @@ void NavUKF_core::Log_Write(void) const
     emit_fmt_in_replay(UKF2_DEF);
     emit_fmt_in_replay(UKF3_DEF);
     emit_fmt_in_replay(UKFD_DEF);
+    emit_fmt_in_replay(UKFH_DEF);
 
     const uint64_t time_us = AP::dal().micros64();
     const uint8_t core = DAL_CORE(0);
@@ -588,6 +613,12 @@ void NavUKF_core::Log_Write(void) const
                        float(x[4]), float(x[5]), float(x[6]),
                        float(x[7]), float(x[8]), float(x[9]),
                        _horizon_delay_ms, dropped_count, late_count);
+
+    // @LoggerMessage: UKFH
+    // @Description: UKF shadow estimator observability and health: ABF accel bias axes not learned (bit 0 x, 1 y, 2 z); AH filtered horizontal acceleration
+    AP::logger().Write(UKFH_DEF,
+                       time_us, core,
+                       abias_frozen, float(man_accel));
 
     // @LoggerMessage: UKF2
     // @Description: UKF shadow estimator: gyro bias, accel bias, baro bias, wind

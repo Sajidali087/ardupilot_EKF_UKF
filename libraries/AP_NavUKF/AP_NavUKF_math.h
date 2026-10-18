@@ -83,11 +83,13 @@ struct UpdateResult {
   z: measurement, R: diagonal measurement variances, m <= MAX_MEAS.
   angle_mask bit j set: measurement j is an angle (circular mean, differences wrapped to [-pi, pi]).
   On success x <- x (+) K nu and P <- P - Pxz S^-1 Pxz^T (symmetrized).
+  frozen bit r set: error state r is a consider state (Schmidt): its gain row is zero, so its estimate and
+  variance stay unchanged, and its cross covariances become P_rc - K_c Pxz_r^T (ukf_state_model.md Section 13).
   Returns false (x, P unchanged) if S is not positive definite.
  */
 bool unscented_update(ftype x[NUM_STATES], ftype P[NUM_ERR][NUM_ERR], const Weights &w,
                       const ftype chi[NUM_SIGMA][NUM_STATES], const ftype Z[NUM_SIGMA][MAX_MEAS],
                       uint8_t m, const ftype z[MAX_MEAS], const ftype R[MAX_MEAS], uint8_t angle_mask,
-                      UpdateResult &res);
+                      UpdateResult &res, uint32_t frozen = 0);
 
 } // namespace UKFMath

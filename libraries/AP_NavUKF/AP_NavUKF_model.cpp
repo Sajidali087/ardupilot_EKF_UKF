@@ -60,7 +60,7 @@ void predict_state(const ftype xin[NUM_STATES], const Vector3F &dAng, ftype dtA,
     xout[9] = p_new.z;
 }
 
-void add_process_noise(ftype P[NUM_ERR][NUM_ERR], const ProcessNoise &q, ftype dtA, ftype dtV)
+void add_process_noise(ftype P[NUM_ERR][NUM_ERR], const ProcessNoise &q, ftype dtA, ftype dtV, uint8_t abias_frozen)
 {
     const ftype tau = ftype(NOISE_TAU);
     const ftype att = q.gyro * q.gyro * tau * dtA;
@@ -75,11 +75,30 @@ void add_process_noise(ftype P[NUM_ERR][NUM_ERR], const ProcessNoise &q, ftype d
         P[3 + i][3 + i] += vel;
         P[6 + i][6 + i] += pos;
         P[9 + i][9 + i] += gb;
-        P[12 + i][12 + i] += ab;
+        if (!(abias_frozen & (1U << i))) {
+            P[12 + i][12 + i] += ab;
+        }
     }
     P[15][15] += bb;
     P[16][16] += wn;
     P[17][17] += wn;
+}
+
+uint8_t abias_frozen_axes(const QuaternionF &q, bool manoeuvring)
+{
+    if (manoeuvring) {
+        return 0;
+    }
+    // row 2 of the body-to-NED rotation: down component of each body axis (EKF3 prevTnb[i][2])
+    Matrix3F R;
+    q.rotation_matrix(R);
+    uint8_t frozen = 0;
+    for (uint8_t i = 0; i < 3; i++) {
+        if (fabsF(R.c[i]) <= ftype(0.8)) {
+            frozen |= (1U << i);
+        }
+    }
+    return frozen;
 }
 
 bool nis_inside_bounds(ftype nis, uint8_t m)

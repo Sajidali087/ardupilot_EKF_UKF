@@ -52,8 +52,17 @@ ftype yaw_from_mag(const Vector3F &mag, ftype roll, ftype pitch, ftype declinati
 void predict_state(const ftype xin[NUM_STATES], const Vector3F &dAng, ftype dtA,
                    const Vector3F &dVel, ftype dtV, ftype xout[NUM_STATES]);
 
-// add the diagonal process noise of one step to P (error-state covariance)
-void add_process_noise(ftype P[NUM_ERR][NUM_ERR], const ProcessNoise &q, ftype dtA, ftype dtV);
+// add the diagonal process noise of one step to P (error-state covariance);
+// abias_frozen bit i set: no process noise on accel bias axis i (body), which is not being learned
+void add_process_noise(ftype P[NUM_ERR][NUM_ERR], const ProcessNoise &q, ftype dtA, ftype dtV, uint8_t abias_frozen = 0);
+
+/*
+  accel bias axes (body) that are not learned (Part 2 Step 15.2, ukf_state_model.md Section 13):
+  at rest or in steady flight tilt and horizontal accel bias cannot be told apart. A body axis is learned
+  when it points within acos(0.8) = 37 deg of the vertical (as EKF3 on the ground) or while manoeuvring.
+  Returns bit i set for each frozen axis i.
+ */
+uint8_t abias_frozen_axes(const QuaternionF &q, bool manoeuvring);
 
 // measurement models h(x) (ukf_state_model.md Section 5), sequential updates
 enum class Meas : uint8_t {

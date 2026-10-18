@@ -92,6 +92,11 @@ private:
     uint32_t dropped_count;             // buffered samples lost to a full buffer
     uint32_t late_count;                // measurements fused more than dt/2 after their time of validity
 
+    // accel bias observability (ukf_state_model.md Section 13)
+    ftype man_accel;                    // filtered horizontal acceleration, m/s^2
+    ftype man_rate;                     // filtered rotation rate, rad/s
+    uint8_t abias_frozen;               // bit i: body accel bias axis i is not learned
+
     // output predictor (EKF3-style complementary tracking of the horizon state)
     ftype xout[10];                     // q, v, p at the current time
     Vector3F out_dang_corr;             // delta angle correction per IMU step, rad
@@ -127,6 +132,9 @@ private:
 
     // sensor delays from the parameters (GPS -1: driver lag); false while the GPS lag is unknown
     bool setup_delays(void);
+
+    // which accel bias axes are learned in this step (manoeuvre detection at the horizon)
+    void update_abias_learning(const Vector3F &dAng, ftype dtA, const Vector3F &dVel, ftype dtV);
 
     // sigma point prediction with the IMU deltas, then process noise
     void predict(const Vector3F &dAng, ftype dtA, const Vector3F &dVel, ftype dtV);

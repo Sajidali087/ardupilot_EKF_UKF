@@ -229,7 +229,7 @@ void unscented_covariance(const ftype chi[NUM_SIGMA][NUM_STATES], const ftype xb
 bool unscented_update(ftype x[NUM_STATES], ftype P[NUM_ERR][NUM_ERR], const Weights &w,
                       const ftype chi[NUM_SIGMA][NUM_STATES], const ftype Z[NUM_SIGMA][MAX_MEAS],
                       uint8_t m, const ftype z[MAX_MEAS], const ftype R[MAX_MEAS], uint8_t angle_mask,
-                      UpdateResult &res)
+                      UpdateResult &res, uint32_t frozen)
 {
     if (m == 0 || m > MAX_MEAS) {
         return false;
@@ -334,15 +334,17 @@ bool unscented_update(ftype x[NUM_STATES], ftype P[NUM_ERR][NUM_ERR], const Weig
         }
     }
 
-    // gain K = Pxz S^-1, state correction K nu
+    // gain K = Pxz S^-1 (zero rows for consider states), state correction K nu
     ftype K[NUM_ERR][MAX_MEAS];
     ftype corr[NUM_ERR];
     for (uint8_t r = 0; r < NUM_ERR; r++) {
         corr[r] = 0;
         for (uint8_t b = 0; b < m; b++) {
             ftype s = 0;
-            for (uint8_t k = 0; k < m; k++) {
-                s += Pxz[r][k] * Sinv[k][b];
+            if (!(frozen & (1UL << r))) {
+                for (uint8_t k = 0; k < m; k++) {
+                    s += Pxz[r][k] * Sinv[k][b];
+                }
             }
             K[r][b] = s;
             corr[r] += s * res.innov[b];
@@ -352,12 +354,21 @@ bool unscented_update(ftype x[NUM_STATES], ftype P[NUM_ERR][NUM_ERR], const Weig
     state_plus(x, corr, xnew);
     memcpy(x, xnew, sizeof(xnew));
 
-    // P <- P - K Pxz^T  (= P - K S K^T), then exactly symmetric
+    // P <- P - K Pxz^T  (= P - K S K^T), then exactly symmetric.
+    // With consider states (Joseph form with zero gain rows, P - K Pzx - Pxz K^T + K S K^T):
+    // both free: K_r Pxz_c^T as before; one frozen: the free row's gain times the frozen row of Pxz; both frozen: 0
     for (uint8_t r = 0; r < NUM_ERR; r++) {
+        const bool fr = frozen & (1UL << r);
         for (uint8_t c = r; c < NUM_ERR; c++) {
+            const bool fc = frozen & (1UL << c);
+            if (fr && fc) {
+                continue;
+            }
+            const uint8_t g = fr ? c : r;   // row with a gain
+            const uint8_t o = fr ? r : c;   // the other row
             ftype s = 0;
             for (uint8_t k = 0; k < m; k++) {
-                s += K[r][k] * Pxz[c][k];
+                s += K[g][k] * Pxz[o][k];
             }
             P[r][c] -= s;
         }

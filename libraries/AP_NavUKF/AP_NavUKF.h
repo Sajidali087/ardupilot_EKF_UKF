@@ -43,6 +43,9 @@ public:
     int16_t baro_delay_ms() const { return _baro_delay_ms.get(); }
     int16_t mag_delay_ms() const { return _mag_delay_ms.get(); }
 
+    // horizontal acceleration above which horizontal accel bias is learned, m/s^2
+    ftype abias_man() const { return _abias_man.get(); }
+
     // fusion horizon delay in ms chosen at initialisation
     uint16_t horizon_delay_ms() const { return core.horizon_delay_ms(); }
 
@@ -65,6 +68,7 @@ private:
     AP_Int16 _gps_delay_ms;     // GPS delay, ms (-1: driver lag)
     AP_Int16 _baro_delay_ms;    // baro delay, ms
     AP_Int16 _mag_delay_ms;     // compass delay, ms
+    AP_Float _abias_man;        // accel bias learning threshold, m/s^2
 
     NavUKF_core core{*this};
 

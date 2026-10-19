@@ -36,6 +36,8 @@ struct MeasNoise {
     ftype gps_vel;      // m/s, floor
     ftype baro;         // m
     ftype yaw;          // rad
+    ftype airspeed;     // m/s, true airspeed
+    ftype sideslip;     // m/s, lateral body airspeed of the synthetic sideslip update
 };
 
 // roll and pitch (rad) from the mean specific force f (body, m/s^2) at rest
@@ -70,6 +72,8 @@ enum class Meas : uint8_t {
     GPS_VEL = 1,    // v, 3 (2 if the receiver has no vertical velocity)
     BARO = 2,       // -p_D + b_baro, 1
     YAW = 3,        // yaw(q), 1, angle
+    AIRSPEED = 4,   // true airspeed |v - w|, w = (wN, wE, 0), 1 (Part 2 Step 16)
+    SIDESLIP = 5,   // lateral body airspeed (q^-1 (v - w)).y, synthetic measurement 0, 1 (Step 16, optional)
 };
 
 // true if NIS lies inside the two-sided 95 % chi-square bounds for m degrees of freedom (ukf_state_model.md Section 8)

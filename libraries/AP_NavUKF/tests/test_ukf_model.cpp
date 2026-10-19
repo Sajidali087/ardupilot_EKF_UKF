@@ -193,6 +193,40 @@ TEST(UKFModel, AccelBiasFreezeAndProcessNoise)
     EXPECT_NEAR(P[14][14], pn.accel_bias * pn.accel_bias * dt, TOL * TOL);
 }
 
+TEST(UKFModel, AirspeedAndSideslip)
+{
+    // flying north-east at 25 m/s with 2 m/s climb in an 8 m/s wind from the west (blowing east)
+    ftype x[NUM_STATES];
+    const ftype yaw = ftype(0.6);
+    state_from_euler(x, ftype(0.1), ftype(0.05), yaw);
+    const Vector3F va_ned(ftype(25) * cosF(yaw), ftype(25) * sinF(yaw), ftype(-2));
+    x[17] = 0;          // wind north
+    x[18] = 8;          // wind east
+    x[4] = va_ned.x + x[17];
+    x[5] = va_ned.y + x[18];
+    x[6] = va_ned.z;
+    ftype z[UKFMath::MAX_MEAS];
+    EXPECT_EQ(measure(Meas::AIRSPEED, x, z, false), 1);
+    EXPECT_NEAR(z[0], va_ned.length(), TOL);
+    // air velocity along the heading: no lateral body component when the roll is about the air velocity
+    // (coordinated); here roll is about the body x axis, which is not exactly along va, so build it level
+    state_from_euler(x, 0, 0, yaw);
+    x[17] = 0; x[18] = 8;
+    x[4] = ftype(25) * cosF(yaw) + x[17];
+    x[5] = ftype(25) * sinF(yaw) + x[18];
+    x[6] = 0;
+    EXPECT_EQ(measure(Meas::SIDESLIP, x, z, false), 1);
+    EXPECT_NEAR(z[0], 0, TOL);
+    // 10 deg of crab: lateral airspeed 25 sin(10 deg), positive to the right when the nose is left of the air velocity
+    state_from_euler(x, 0, 0, yaw - HALF_PI / 9);
+    x[17] = 0; x[18] = 8;
+    x[4] = ftype(25) * cosF(yaw) + x[17];
+    x[5] = ftype(25) * sinF(yaw) + x[18];
+    x[6] = 0;
+    measure(Meas::SIDESLIP, x, z, false);
+    EXPECT_NEAR(z[0], ftype(25) * sinF(HALF_PI / 9), TOL * 100);
+}
+
 TEST(UKFModel, NisBounds)
 {
     // two-sided 95 % chi-square bounds (ukf_state_model.md Section 8)

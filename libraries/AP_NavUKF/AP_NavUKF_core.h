@@ -31,7 +31,7 @@ public:
     // NIS monitoring: updates of measurement type t (0..3) counted after the settling time, and how many had NIS inside the 95 % bounds
     uint32_t nis_count(uint8_t t) const { return t < NUM_MEAS_TYPES ? _nis_count[t] : 0; }
     uint32_t nis_inside(uint8_t t) const { return t < NUM_MEAS_TYPES ? _nis_inside[t] : 0; }
-    static constexpr uint8_t NUM_MEAS_TYPES = 4;
+    static constexpr uint8_t NUM_MEAS_TYPES = 6;
 
     // fusion horizon delay chosen at initialisation, ms
     uint16_t horizon_delay_ms(void) const { return _horizon_delay_ms; }
@@ -53,6 +53,7 @@ private:
     uint32_t last_gps_ms;
     uint32_t last_baro_ms;
     uint32_t last_mag_us;
+    uint32_t last_arsp_ms;
 
     // delayed fusion horizon (ukf_state_model.md Section 12)
     struct ImuSample {
@@ -78,15 +79,21 @@ private:
         Vector3F field;                 // mean body-frame field of the yaw compasses
         uint64_t valid_us;
     };
+    struct AirSample {
+        ftype tas;                      // true airspeed, m/s
+        uint64_t valid_us;
+    };
     static constexpr uint8_t IMU_BUF_LEN = 20;     // 400 ms at 50 Hz: largest delay 250 ms plus the 60 ms arrival margin
     static constexpr uint8_t OBS_BUF_LEN = 8;      // 400 ms of 20 Hz data
     UKFBuffer::Ring<ImuSample, IMU_BUF_LEN> imu_buf;
     UKFBuffer::Ring<GpsSample, OBS_BUF_LEN> gps_buf;
     UKFBuffer::Ring<BaroSample, OBS_BUF_LEN> baro_buf;
     UKFBuffer::Ring<MagSample, OBS_BUF_LEN> mag_buf;
+    UKFBuffer::Ring<AirSample, OBS_BUF_LEN> air_buf;
     int32_t gps_delay_us;               // GPS delay minus the stamp offset (negative: data newer than the stamp)
     uint32_t baro_delay_us;
     uint32_t mag_delay_us;
+    uint32_t arsp_delay_us;
     uint16_t _horizon_delay_ms;
     uint64_t horizon_us;                // time of validity of x and P
     uint32_t dropped_count;             // buffered samples lost to a full buffer
@@ -144,8 +151,9 @@ private:
     // sigma point prediction with the IMU deltas, then process noise
     void predict(const Vector3F &dAng, ftype dtA, const Vector3F &dVel, ftype dtV);
 
-    // new GPS, baro and compass samples into their buffers, stamped with their time of validity
+    // new GPS, baro, compass and airspeed samples into their buffers, stamped with their time of validity
     void read_sensors(void);
+    void read_airspeed(void);
 
     // predict the horizon state with the oldest buffered IMU sample, fuse what is due, correct the output
     void advance_horizon(void);
@@ -156,6 +164,7 @@ private:
     void fuse_gps(const GpsSample &s);
     void fuse_baro(const BaroSample &s);
     void fuse_yaw(const MagSample &s);
+    void fuse_airspeed(const AirSample &s);
 
     // output predictor: propagate with the newest IMU sample; track the horizon state at a delayed sample
     void predict_output(const Vector3F &dAng, ftype dtA, const Vector3F &dVel, ftype dtV);

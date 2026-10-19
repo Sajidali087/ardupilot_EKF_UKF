@@ -4,6 +4,11 @@
 
 #include <AP_DAL/AP_DAL.h>
 
+// airspeed defaults measured in SITL against the simulator truth (docs/noise_table.md, Step 16)
+#define ARSP_NSE_DEFAULT    0.05f   // m/s: Pitot TAS scatter 0.042 m/s at the matched delay (p2_w1_wind)
+#define ARSP_DELAY_DEFAULT  200     // ms: effective Pitot delay (S1, p2_w1_wind)
+#define ARSP_SCL_DEFAULT    1.034f  // SITL Pitot reads 1/EAS2TAS low: DAL airspeed x EAS2TAS = true EAS
+
 const AP_Param::GroupInfo NavUKF::var_info[] = {
     // @Param: ENABLE
     // @DisplayName: Enable UKF shadow estimator
@@ -157,6 +162,44 @@ const AP_Param::GroupInfo NavUKF::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("GPS_TOFS", 19, NavUKF, _gps_tofs_ms, 0),
 
+    // @Param: ARSP_NSE
+    // @DisplayName: Airspeed noise
+    // @Description: Standard deviation of the true airspeed measurement (Pitot EAS times EAS2TAS)
+    // @Units: m/s
+    // @Range: 0.05 5.0
+    // @User: Advanced
+    AP_GROUPINFO("ARSP_NSE", 20, NavUKF, _arsp_noise, ARSP_NSE_DEFAULT),
+
+    // @Param: ARSP_DELAY
+    // @DisplayName: Airspeed measurement delay
+    // @Description: Delay of the airspeed data relative to the IMU
+    // @Units: ms
+    // @Range: 0 250
+    // @User: Advanced
+    AP_GROUPINFO("ARSP_DELAY", 21, NavUKF, _arsp_delay_ms, ARSP_DELAY_DEFAULT),
+
+    // @Param: SSLIP_EN
+    // @DisplayName: Synthetic sideslip update
+    // @Description: Fuse a zero lateral body airspeed with every airspeed sample (fixed wing in coordinated flight)
+    // @Values: 0:Disabled,1:Enabled
+    // @User: Advanced
+    AP_GROUPINFO("SSLIP_EN", 22, NavUKF, _sslip_en, 0),
+
+    // @Param: SSLIP_NSE
+    // @DisplayName: Synthetic sideslip noise
+    // @Description: Standard deviation of the lateral body airspeed assumed by the synthetic sideslip update
+    // @Units: m/s
+    // @Range: 0.1 5.0
+    // @User: Advanced
+    AP_GROUPINFO("SSLIP_NSE", 23, NavUKF, _sslip_noise, 1.0f),
+
+    // @Param: ARSP_SCL
+    // @DisplayName: Airspeed scale
+    // @Description: Factor applied to the true airspeed (Pitot EAS times EAS2TAS) before fusion, as a Pitot calibration (ARSPD_RATIO does the same in the airspeed library). In SITL the Pitot reads 1/EAS2TAS low (measured 1.034 on S1 and p2_w1_wind against the simulator truth); EKF3 does not apply it.
+    // @Range: 0.8 1.2
+    // @User: Advanced
+    AP_GROUPINFO("ARSP_SCL", 24, NavUKF, _arsp_scale, ARSP_SCL_DEFAULT),
+
     AP_GROUPEND
 };
 
@@ -185,6 +228,8 @@ UKFModel::MeasNoise NavUKF::meas_noise() const
     r.gps_vel = _gps_v_noise.get();
     r.baro = _baro_noise.get();
     r.yaw = _yaw_noise.get();
+    r.airspeed = _arsp_noise.get();
+    r.sideslip = _sslip_noise.get();
     return r;
 }
 

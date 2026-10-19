@@ -33,6 +33,7 @@ static constexpr float FLOOR_SIG_POS_V = 0.35f;     // m, GPS vertical floor
 // delayed fusion horizon (ukf_state_model.md Section 12)
 static constexpr uint16_t MAX_DELAY_MS = 250;       // largest sensor delay accepted (EKF3 uses the same limit for the GPS)
 static constexpr int16_t MAX_TOFS_MS = 50;          // largest GPS stamp offset accepted
+static constexpr float ARSP_MIN_GSPD = 3.0f;        // m/s, airspeed and sideslip updates only above this ground speed
 // accel bias observability (ukf_state_model.md Section 13)
 static constexpr float MAN_TAU = 1.0f;              // s, filter of the manoeuvre measures
 static constexpr float MAN_RATE = 0.1f;             // rad/s, rotation rate that counts as manoeuvring
@@ -176,6 +177,11 @@ void NavUKF_core::try_initialise(const Vector3F &dAng, ftype dtA, const Vector3F
     gps_buf.reset();
     baro_buf.reset();
     mag_buf.reset();
+    air_buf.reset();
+    {
+        const auto *arsp = AP::dal().airspeed();
+        last_arsp_ms = (arsp != nullptr) ? arsp->last_update_ms() : 0;
+    }
     dropped_count = 0;
     late_count = 0;
     man_accel = 0;
@@ -206,14 +212,16 @@ bool NavUKF_core::setup_delays(void)
     }
     const uint16_t baro_ms = MIN(uint16_t(MAX(frontend.baro_delay_ms(), int16_t(0))), MAX_DELAY_MS);
     const uint16_t mag_ms = MIN(uint16_t(MAX(frontend.mag_delay_ms(), int16_t(0))), MAX_DELAY_MS);
+    const uint16_t arsp_ms = MIN(uint16_t(MAX(frontend.arsp_delay_ms(), int16_t(0))), MAX_DELAY_MS);
     // GPS: the stamp offset moves the time of validity later (data newer than its stamp) or earlier
     const int16_t tofs_ms = constrain_int16(frontend.gps_tofs_ms(), -MAX_TOFS_MS, MAX_TOFS_MS);
     const int32_t gps_eff_ms = int32_t(gps_ms) - tofs_ms;
     gps_delay_us = gps_eff_ms * 1000;
     baro_delay_us = baro_ms * 1000U;
     mag_delay_us = mag_ms * 1000U;
+    arsp_delay_us = arsp_ms * 1000U;
     // the horizon stays behind the time of validity of every sample still to arrive
-    _horizon_delay_ms = MAX(uint16_t(MAX(gps_eff_ms, int32_t(0))), MAX(baro_ms, mag_ms)) + HORIZON_MARGIN_MS;
+    _horizon_delay_ms = MAX(MAX(uint16_t(MAX(gps_eff_ms, int32_t(0))), arsp_ms), MAX(baro_ms, mag_ms)) + HORIZON_MARGIN_MS;
     return true;
 }
 
@@ -268,6 +276,8 @@ void NavUKF_core::read_sensors(void)
         }
     }
 
+    read_airspeed();
+
     // compass: new mean field of the yaw compasses (32-bit microsecond stamp, converted wrap-safe)
     MagSample m;
     uint32_t t_us;
@@ -278,6 +288,22 @@ void NavUKF_core::read_sensors(void)
         if (!mag_buf.push(m)) {
             dropped_count++;
         }
+    }
+}
+
+void NavUKF_core::read_airspeed(void)
+{
+    // primary Pitot, if fitted, enabled for use and healthy; EAS to TAS as EKF3 (readAirSpdData)
+    auto *arsp = AP::dal().airspeed();
+    if (arsp == nullptr || !arsp->use() || !arsp->healthy() || arsp->last_update_ms() == last_arsp_ms) {
+        return;
+    }
+    last_arsp_ms = arsp->last_update_ms();
+    AirSample a;
+    a.tas = ftype(arsp->get_airspeed()) * ftype(AP::dal().get_EAS2TAS()) * frontend.arsp_scale();
+    a.valid_us = valid_from_ms(last_arsp_ms, int32_t(arsp_delay_us));
+    if (!air_buf.push(a)) {
+        dropped_count++;
     }
 }
 
@@ -402,6 +428,24 @@ void NavUKF_core::count_late(uint64_t valid_us, uint32_t half_dt_us)
     }
 }
 
+void NavUKF_core::fuse_airspeed(const AirSample &a)
+{
+    // not on the ground or at low speed: wind is not observable and the Pitot reads noise
+    if (norm(x[4], x[5]) < ftype(ARSP_MIN_GSPD)) {
+        return;
+    }
+    const UKFModel::MeasNoise r = frontend.meas_noise();
+    const ftype z[MAX_MEAS] = { a.tas, 0, 0 };
+    const ftype sd[MAX_MEAS] = { r.airspeed, 0, 0 };
+    fuse(UKFModel::Meas::AIRSPEED, 1, z, sd);
+    if (frontend.sideslip_enabled()) {
+        // synthetic measurement: no lateral body airspeed in coordinated flight
+        const ftype zs[MAX_MEAS] = { 0, 0, 0 };
+        const ftype ss[MAX_MEAS] = { r.sideslip, 0, 0 };
+        fuse(UKFModel::Meas::SIDESLIP, 1, zs, ss);
+    }
+}
+
 void NavUKF_core::fuse_due(uint32_t half_dt_us)
 {
     // same order as Part 1: GPS position and velocity, baro, yaw
@@ -419,6 +463,11 @@ void NavUKF_core::fuse_due(uint32_t half_dt_us)
         count_late(mag_buf.oldest().valid_us, half_dt_us);
         fuse_yaw(mag_buf.oldest());
         mag_buf.pop();
+    }
+    while (!air_buf.empty() && UKFBuffer::meas_due(air_buf.oldest().valid_us, horizon_us, half_dt_us)) {
+        count_late(air_buf.oldest().valid_us, half_dt_us);
+        fuse_airspeed(air_buf.oldest());
+        air_buf.pop();
     }
 }
 
@@ -599,7 +648,7 @@ void NavUKF_core::Log_Write_Innov(uint8_t type, const UpdateResult &res, bool in
 #if HAL_LOGGING_ENABLED
     emit_fmt_in_replay(UKFN_DEF);
     // @LoggerMessage: UKFN
-    // @Description: UKF shadow estimator: innovations of one update (T: 0 GPS position, 1 GPS velocity, 2 baro, 3 yaw); In: 1 if NIS is inside the 95 % bounds
+    // @Description: UKF shadow estimator: innovations of one update (T: 0 GPS position, 1 GPS velocity, 2 baro, 3 yaw, 4 airspeed, 5 sideslip); In: 1 if NIS is inside the 95 % bounds
     ftype in[MAX_MEAS] {}, sd[MAX_MEAS] {};
     for (uint8_t j = 0; j < res.m; j++) {
         in[j] = res.innov[j];

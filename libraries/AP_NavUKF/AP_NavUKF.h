@@ -27,7 +27,7 @@ public:
     // true once the core has aligned and initialised
     bool initialised() const { return core.initialised(); }
 
-    // NIS monitoring after the settling time, per measurement type (0 GPS pos, 1 GPS vel, 2 baro, 3 yaw)
+    // NIS monitoring after the settling time, per measurement type (0 GPS pos, 1 GPS vel, 2 baro, 3 yaw, 4 airspeed, 5 sideslip)
     uint32_t nis_count(uint8_t t) const { return core.nis_count(t); }
     uint32_t nis_inside(uint8_t t) const { return core.nis_inside(t); }
 
@@ -43,6 +43,9 @@ public:
     int16_t baro_delay_ms() const { return _baro_delay_ms.get(); }
     int16_t mag_delay_ms() const { return _mag_delay_ms.get(); }
     int16_t gps_tofs_ms() const { return _gps_tofs_ms.get(); }
+    int16_t arsp_delay_ms() const { return _arsp_delay_ms.get(); }
+    bool sideslip_enabled() const { return _sslip_en != 0; }
+    ftype arsp_scale() const { return _arsp_scale.get(); }
 
     // horizontal acceleration above which horizontal accel bias is learned, m/s^2
     ftype abias_man() const { return _abias_man.get(); }
@@ -71,6 +74,11 @@ private:
     AP_Int16 _mag_delay_ms;     // compass delay, ms
     AP_Float _abias_man;        // accel bias learning threshold, m/s^2
     AP_Int16 _gps_tofs_ms;      // GPS stamp offset, ms (positive: data newer than the stamp)
+    AP_Float _arsp_noise;       // true airspeed noise, m/s
+    AP_Int16 _arsp_delay_ms;    // airspeed delay, ms
+    AP_Int8 _sslip_en;          // synthetic sideslip update on
+    AP_Float _sslip_noise;      // lateral body airspeed noise, m/s
+    AP_Float _arsp_scale;       // Pitot calibration factor on true airspeed
 
     NavUKF_core core{*this};
 

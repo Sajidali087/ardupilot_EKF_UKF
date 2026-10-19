@@ -138,6 +138,18 @@ uint8_t measure(Meas t, const ftype x[NUM_STATES], ftype zeta[UKFMath::MAX_MEAS]
     case Meas::YAW:
         zeta[0] = yaw_of_state(x);
         return 1;
+    case Meas::AIRSPEED:
+    case Meas::SIDESLIP: {
+        // air-relative velocity in NED (wind horizontal, ukf_state_model.md Section 15)
+        const Vector3F va(x[4] - x[17], x[5] - x[18], x[6]);
+        if (t == Meas::AIRSPEED) {
+            zeta[0] = va.length();
+        } else {
+            const QuaternionF q(x[0], x[1], x[2], x[3]);
+            zeta[0] = (q.inverse() * va).y;
+        }
+        return 1;
+    }
     }
     return 0;
 }

@@ -138,6 +138,9 @@ uint8_t measure(Meas t, const ftype x[NUM_STATES], ftype zeta[UKFMath::MAX_MEAS]
     case Meas::YAW:
         zeta[0] = yaw_of_state(x);
         return 1;
+    case Meas::GPS_HGT:
+        zeta[0] = x[9];
+        return 1;
     case Meas::AIRSPEED:
     case Meas::SIDESLIP: {
         // air-relative velocity in NED (wind horizontal, ukf_state_model.md Section 15)

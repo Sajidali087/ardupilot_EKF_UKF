@@ -227,6 +227,17 @@ TEST(UKFModel, AirspeedAndSideslip)
     EXPECT_NEAR(z[0], ftype(25) * sinF(HALF_PI / 9), TOL * 100);
 }
 
+TEST(UKFModel, GpsHeightOnly)
+{
+    // Step 17: with GPS horizontal position switched off the GPS height is fused alone, h = p_D
+    ftype x[NUM_STATES];
+    state_from_euler(x, 0, 0, 0);
+    x[7] = 12; x[8] = -3; x[9] = -95;
+    ftype z[UKFMath::MAX_MEAS];
+    EXPECT_EQ(measure(Meas::GPS_HGT, x, z, false), 1);
+    EXPECT_NEAR(z[0], ftype(-95), TOL);
+}
+
 TEST(UKFModel, NisBounds)
 {
     // two-sided 95 % chi-square bounds (ukf_state_model.md Section 8)

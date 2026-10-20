@@ -31,7 +31,14 @@ public:
     // NIS monitoring: updates of measurement type t (0..3) counted after the settling time, and how many had NIS inside the 95 % bounds
     uint32_t nis_count(uint8_t t) const { return t < NUM_MEAS_TYPES ? _nis_count[t] : 0; }
     uint32_t nis_inside(uint8_t t) const { return t < NUM_MEAS_TYPES ? _nis_inside[t] : 0; }
-    static constexpr uint8_t NUM_MEAS_TYPES = 6;
+    static constexpr uint8_t NUM_MEAS_TYPES = 7;
+
+    // aiding sources (UKF_MOD_MASK bits) and fusion modules (docs/part2/fusion_modules.md)
+    enum Source : uint8_t { SRC_GPS_HPOS = 0, SRC_GPS_HGT = 1, SRC_GPS_VEL = 2, SRC_AIRSPEED = 3, SRC_BARO = 4, SRC_COMPASS = 5, NUM_SRC = 6 };
+    enum Module : uint8_t { MOD_VELOCITY = 0, MOD_POSITION = 1, MOD_ALTITUDE = 2, MOD_HEADING = 3, NUM_MOD = 4 };
+    enum ModuleStatus : uint8_t { MS_AIDED = 0, MS_DEGRADED = 1, MS_UNAIDED = 2 };
+    // status of a module: all its switched-on sources fused within the last second, some, or none
+    ModuleStatus module_status(Module mod, uint8_t &src_in_use) const;
 
     // fusion horizon delay chosen at initialisation, ms
     uint16_t horizon_delay_ms(void) const { return _horizon_delay_ms; }
@@ -108,6 +115,10 @@ private:
     ftype baro_cusum_hi;
     ftype baro_cusum_lo;
     uint16_t baro_step_count;
+
+    // fusion modules: horizon time each aiding source was last fused
+    uint64_t last_src_fuse_us[NUM_SRC];
+    uint8_t module_log_div;                 // UKFM is written every 5th frame (10 Hz)
 
     // output predictor (EKF3-style complementary tracking of the horizon state)
     ftype xout[10];                     // q, v, p at the current time

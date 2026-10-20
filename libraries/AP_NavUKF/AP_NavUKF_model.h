@@ -74,6 +74,7 @@ enum class Meas : uint8_t {
     YAW = 3,        // yaw(q), 1, angle
     AIRSPEED = 4,   // true airspeed |v - w|, w = (wN, wE, 0), 1 (Part 2 Step 16)
     SIDESLIP = 5,   // lateral body airspeed (q^-1 (v - w)).y, synthetic measurement 0, 1 (Step 16, optional)
+    GPS_HGT = 6,    // GPS vertical position p_D alone, 1 (Step 17: GPS horizontal position switched off)
 };
 
 // true if NIS lies inside the two-sided 95 % chi-square bounds for m degrees of freedom (ukf_state_model.md Section 8)

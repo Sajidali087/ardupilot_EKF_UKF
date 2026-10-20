@@ -184,6 +184,8 @@ void NavUKF_core::try_initialise(const Vector3F &dAng, ftype dtA, const Vector3F
     }
     dropped_count = 0;
     late_count = 0;
+    memset(last_src_fuse_us, 0, sizeof(last_src_fuse_us));
+    module_log_div = 0;
     man_accel = 0;
     man_rate = 0;
     baro_cusum_hi = 0;
@@ -383,18 +385,41 @@ void NavUKF_core::baro_step_check(const UpdateResult &res)
 
 void NavUKF_core::fuse_gps(const GpsSample &g)
 {
-    const ftype zp[MAX_MEAS] = { g.pos[0], g.pos[1], g.pos[2] };
-    const ftype sp[MAX_MEAS] = { g.sd_pos_h, g.sd_pos_h, g.sd_pos_v };
-    fuse(UKFModel::Meas::GPS_POS, 3, zp, sp);
+    // position (position and altitude modules): 3D as one update when both parts are switched on
+    const bool hpos = frontend.source_enabled(SRC_GPS_HPOS);
+    const bool hgt = frontend.source_enabled(SRC_GPS_HGT);
+    if (hpos) {
+        const ftype zp[MAX_MEAS] = { g.pos[0], g.pos[1], g.pos[2] };
+        const ftype sp[MAX_MEAS] = { g.sd_pos_h, g.sd_pos_h, g.sd_pos_v };
+        if (fuse(UKFModel::Meas::GPS_POS, hgt ? 3 : 2, zp, sp)) {
+            last_src_fuse_us[SRC_GPS_HPOS] = horizon_us;
+            if (hgt) {
+                last_src_fuse_us[SRC_GPS_HGT] = horizon_us;
+            }
+        }
+    } else if (hgt) {
+        const ftype zh[MAX_MEAS] = { g.pos[2], 0, 0 };
+        const ftype sh[MAX_MEAS] = { g.sd_pos_v, 0, 0 };
+        if (fuse(UKFModel::Meas::GPS_HGT, 1, zh, sh)) {
+            last_src_fuse_us[SRC_GPS_HGT] = horizon_us;
+        }
+    }
 
-    // velocity, vertical only if the receiver provides it
-    const ftype zv[MAX_MEAS] = { g.vel[0], g.vel[1], g.vel[2] };
-    const ftype sdv[MAX_MEAS] = { g.sd_vel, g.sd_vel, g.sd_vel };
-    fuse(UKFModel::Meas::GPS_VEL, g.have_vz ? 3 : 2, zv, sdv);
+    // velocity (velocity module), vertical only if the receiver provides it
+    if (frontend.source_enabled(SRC_GPS_VEL)) {
+        const ftype zv[MAX_MEAS] = { g.vel[0], g.vel[1], g.vel[2] };
+        const ftype sdv[MAX_MEAS] = { g.sd_vel, g.sd_vel, g.sd_vel };
+        if (fuse(UKFModel::Meas::GPS_VEL, g.have_vz ? 3 : 2, zv, sdv)) {
+            last_src_fuse_us[SRC_GPS_VEL] = horizon_us;
+        }
+    }
 }
 
 void NavUKF_core::fuse_baro(const BaroSample &b)
 {
+    if (!frontend.source_enabled(SRC_BARO)) {
+        return;
+    }
     if (!have_baro_ref) {
         // baro was not healthy at initialisation: reference so that b_baro starts at 0
         baro_ref = b.alt + x[9];
@@ -405,19 +430,25 @@ void NavUKF_core::fuse_baro(const BaroSample &b)
     const ftype sd[MAX_MEAS] = { frontend.meas_noise().baro, 0, 0 };
     UpdateResult res;
     if (fuse(UKFModel::Meas::BARO, 1, z, sd, &res)) {
+        last_src_fuse_us[SRC_BARO] = horizon_us;
         baro_step_check(res);
     }
 }
 
 void NavUKF_core::fuse_yaw(const MagSample &m)
 {
+    if (!frontend.source_enabled(SRC_COMPASS)) {
+        return;
+    }
     // tilt compensation with the horizon estimate (ukf_state_model.md 5.1)
     const QuaternionF q(x[0], x[1], x[2], x[3]);
     const ftype yaw = UKFModel::yaw_from_mag(m.field, q.get_euler_roll(), q.get_euler_pitch(),
                                              AP::dal().compass().get_declination());
     const ftype z[MAX_MEAS] = { yaw, 0, 0 };
     const ftype sd[MAX_MEAS] = { frontend.meas_noise().yaw, 0, 0 };
-    fuse(UKFModel::Meas::YAW, 1, z, sd);
+    if (fuse(UKFModel::Meas::YAW, 1, z, sd)) {
+        last_src_fuse_us[SRC_COMPASS] = horizon_us;
+    }
 }
 
 void NavUKF_core::count_late(uint64_t valid_us, uint32_t half_dt_us)
@@ -431,13 +462,15 @@ void NavUKF_core::count_late(uint64_t valid_us, uint32_t half_dt_us)
 void NavUKF_core::fuse_airspeed(const AirSample &a)
 {
     // not on the ground or at low speed: wind is not observable and the Pitot reads noise
-    if (norm(x[4], x[5]) < ftype(ARSP_MIN_GSPD)) {
+    if (!frontend.source_enabled(SRC_AIRSPEED) || norm(x[4], x[5]) < ftype(ARSP_MIN_GSPD)) {
         return;
     }
     const UKFModel::MeasNoise r = frontend.meas_noise();
     const ftype z[MAX_MEAS] = { a.tas, 0, 0 };
     const ftype sd[MAX_MEAS] = { r.airspeed, 0, 0 };
-    fuse(UKFModel::Meas::AIRSPEED, 1, z, sd);
+    if (fuse(UKFModel::Meas::AIRSPEED, 1, z, sd)) {
+        last_src_fuse_us[SRC_AIRSPEED] = horizon_us;
+    }
     if (frontend.sideslip_enabled()) {
         // synthetic measurement: no lateral body airspeed in coordinated flight
         const ftype zs[MAX_MEAS] = { 0, 0, 0 };
@@ -573,6 +606,33 @@ void NavUKF_core::predict(const Vector3F &dAng, ftype dtA, const Vector3F &dVel,
     UKFModel::add_process_noise(P, frontend.process_noise(), dtA, dtV, abias_frozen);
 }
 
+NavUKF_core::ModuleStatus NavUKF_core::module_status(Module mod, uint8_t &src_in_use) const
+{
+    // aiding sources of each module (docs/part2/fusion_modules.md Section 1)
+    static const uint8_t sources[NUM_MOD] = {
+        (1U << SRC_GPS_VEL) | (1U << SRC_AIRSPEED),     // velocity
+        (1U << SRC_GPS_HPOS),                           // position
+        (1U << SRC_GPS_HGT) | (1U << SRC_BARO),         // altitude
+        (1U << SRC_COMPASS),                            // heading
+    };
+    src_in_use = 0;
+    uint8_t switched_on = 0;
+    for (uint8_t s = 0; s < NUM_SRC; s++) {
+        if (!(sources[mod] & (1U << s)) || !frontend.source_enabled(s)) {
+            continue;
+        }
+        switched_on |= (1U << s);
+        // fused within the last second of horizon time
+        if (last_src_fuse_us[s] != 0 && horizon_us - last_src_fuse_us[s] < 1000000U) {
+            src_in_use |= (1U << s);
+        }
+    }
+    if (src_in_use == 0) {
+        return MS_UNAIDED;
+    }
+    return (src_in_use == switched_on) ? MS_AIDED : MS_DEGRADED;
+}
+
 void NavUKF_core::update(void)
 {
     Vector3F dAng, dVel;
@@ -613,6 +673,7 @@ void NavUKF_core::update(void)
         advance_horizon();
     }
     Log_Write();
+    module_log_div = (module_log_div + 1) % 5;
 }
 
 #if HAL_LOGGING_ENABLED
@@ -622,6 +683,7 @@ void NavUKF_core::update(void)
 #define UKF3_DEF "UKF3", "TimeUS,C,SR,SP,SY,SVN,SVE,SVD,SPN,SPE,SPD,Reg,Fail", "s#dddnnnmmm--", "F-00000000000", "QBfffffffffBI"
 #define UKFD_DEF "UKFD", "TimeUS,C,Roll,Pitch,Yaw,VN,VE,VD,PN,PE,PD,Dly,Drop,Late", "s#ddhnnnmmm---", "F-000000000000", "QBfffffffffHII"
 #define UKFH_DEF "UKFH", "TimeUS,C,ABF,AH,BSt,BCH,BCL", "s#-o---", "F-00000", "QBBfHff"
+#define UKFM_DEF "UKFM", "TimeUS,C,M,V1,V2,V3,S1,S2,S3,Src,St", "s#---------", "F-000000000", "QBBffffffBB"
 #define UKFN_DEF "UKFN", "TimeUS,C,T,I0,I1,I2,S0,S1,S2,NIS,In", "s#---------", "F-000000000", "QBBfffffffB"
 
 /*
@@ -722,6 +784,44 @@ void NavUKF_core::Log_Write(void) const
                        float(sqrtF(P[3][3])), float(sqrtF(P[4][4])), float(sqrtF(P[5][5])),
                        float(sqrtF(P[6][6])), float(sqrtF(P[7][7])), float(sqrtF(P[8][8])),
                        last_regularised, sigma_fail_count);
+
+    // @LoggerMessage: UKFM
+    // @Description: UKF shadow estimator fusion modules at 10 Hz (M: 0 velocity V1-V3 = VN, VE, VD m/s; 1 position V1, V2 = PN, PE m; 2 altitude V1 = height m, V2 = baro bias m; 3 heading V1 = yaw deg, V2 = gyro bias Z rad/s); S1-S3 their standard deviations; Src aiding sources fused in the last second (UKF_MOD_MASK bits); St 0 aided, 1 degraded, 2 unaided
+    if (module_log_div == 0) {
+        emit_fmt_in_replay(UKFM_DEF);
+        for (uint8_t mod = 0; mod < NUM_MOD; mod++) {
+            uint8_t src = 0;
+            const uint8_t st = module_status(Module(mod), src);
+            float v[3] {}, sd[3] {};
+            switch (mod) {
+            case MOD_VELOCITY:
+                for (uint8_t k = 0; k < 3; k++) {
+                    v[k] = xout[4 + k];
+                    sd[k] = sqrtF(P[3 + k][3 + k]);
+                }
+                break;
+            case MOD_POSITION:
+                for (uint8_t k = 0; k < 2; k++) {
+                    v[k] = xout[7 + k];
+                    sd[k] = sqrtF(P[6 + k][6 + k]);
+                }
+                break;
+            case MOD_ALTITUDE:
+                v[0] = -xout[9];
+                v[1] = x[16];
+                sd[0] = sqrtF(P[8][8]);
+                sd[1] = sqrtF(P[15][15]);
+                break;
+            case MOD_HEADING:
+                v[0] = wrap_360(degrees(qo.get_euler_yaw()));
+                v[1] = x[12];
+                sd[0] = degrees(sqrtF(P[2][2]));
+                sd[1] = sqrtF(P[11][11]);
+                break;
+            }
+            AP::logger().Write(UKFM_DEF, time_us, core, mod, v[0], v[1], v[2], sd[0], sd[1], sd[2], src, st);
+        }
+    }
 #endif
 }
 

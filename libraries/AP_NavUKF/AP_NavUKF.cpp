@@ -200,6 +200,13 @@ const AP_Param::GroupInfo NavUKF::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("ARSP_SCL", 24, NavUKF, _arsp_scale, ARSP_SCL_DEFAULT),
 
+    // @Param: MOD_MASK
+    // @DisplayName: Aiding sources of the fusion modules
+    // @Description: Aiding measurements the UKF fuses, by fusion module (docs/part2/fusion_modules.md): position module GPS horizontal position; altitude module GPS height and barometer; velocity module GPS velocity and airspeed (with the synthetic sideslip); heading module compass. Clear a bit to switch that source off, e.g. for module tests.
+    // @Bitmask: 0:GPS horizontal position,1:GPS height,2:GPS velocity,3:Airspeed,4:Barometer,5:Compass
+    // @User: Advanced
+    AP_GROUPINFO("MOD_MASK", 25, NavUKF, _mod_mask, 63),
+
     AP_GROUPEND
 };
 

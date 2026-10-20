@@ -17,13 +17,15 @@ check UKF shadow estimator output in Replay logs (copy of check_replay.py with t
   with a log written before UKFD existed)
 '''
 
-UKF_LIST = ['UKF1', 'UKF2', 'UKF3', 'UKFN', 'UKFD', 'UKFH']
+UKF_LIST = ['UKF1', 'UKF2', 'UKF3', 'UKFN', 'UKFD', 'UKFH', 'UKFM']
 
 
 def msg_key(m):
-    '''UKFN carries several updates per frame, one per measurement type T'''
+    '''UKFN carries several updates per frame, one per measurement type T; UKFM one record per module M'''
     if m.get_type() == 'UKFN':
         return (m.C, m.T)
+    if m.get_type() == 'UKFM':
+        return (m.C, m.M)
     return m.C
 
 

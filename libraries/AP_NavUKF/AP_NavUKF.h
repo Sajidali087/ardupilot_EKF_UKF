@@ -47,6 +47,9 @@ public:
     bool sideslip_enabled() const { return _sslip_en != 0; }
     ftype arsp_scale() const { return _arsp_scale.get(); }
 
+    // aiding sources switched on (UKF_MOD_MASK, bits as NavUKF_core::SRC_*)
+    bool source_enabled(uint8_t bit) const { return (uint16_t(_mod_mask.get()) & (1U << bit)) != 0; }
+
     // horizontal acceleration above which horizontal accel bias is learned, m/s^2
     ftype abias_man() const { return _abias_man.get(); }
 
@@ -79,6 +82,7 @@ private:
     AP_Int8 _sslip_en;          // synthetic sideslip update on
     AP_Float _sslip_noise;      // lateral body airspeed noise, m/s
     AP_Float _arsp_scale;       // Pitot calibration factor on true airspeed
+    AP_Int16 _mod_mask;         // aiding sources of the fusion modules
 
     NavUKF_core core{*this};
 

@@ -18,6 +18,7 @@ static constexpr uint32_t MAG_CONFIRM_MS = 2000;    // a compass vote outcome mu
 static constexpr uint32_t MAG_RELEASE_MS = 5000;    // isolation ends when the compasses agree again this long
 static constexpr float SWITCH_RATIO = 0.5f;         // another core's score must be below this fraction of the primary's
 static constexpr uint32_t SWITCH_MS = 10000;        // for this long
+static constexpr uint16_t TIMING_FRAMES = 50;      // UKFT: one message per 50 frames (1 s at 50 Hz)
 
 // airspeed defaults measured in SITL against the simulator truth (docs/noise_table.md, Step 16)
 #define ARSP_NSE_DEFAULT    0.05f   // m/s: Pitot TAS scatter 0.042 m/s at the matched delay (p2_w1_wind)
@@ -606,6 +607,35 @@ void NavUKF::Log_Write_Vote_Events(void)
 #endif
     imu_out_logged = imu_out;
     compass_logged = compass_isolated;
+}
+
+void NavUKF::record_timing(uint32_t ekf3_ns, uint32_t ukf_ns)
+{
+#if HAL_LOGGING_ENABLED
+    const uint32_t t[2] = { ekf3_ns, ukf_ns };
+    for (uint8_t i = 0; i < 2; i++) {
+        time_sum_ns[i] += t[i];
+        time_max_ns[i] = MAX(time_max_ns[i], t[i]);
+    }
+    if (++time_count < TIMING_FRAMES) {
+        return;
+    }
+#define UKFT_DEF "UKFT", "TimeUS,C,N,EAvg,EMax,UAvg,UMax", "s#-----", "F------", "QBHffff"
+#if APM_BUILD_TYPE(APM_BUILD_Replay)
+    AP_Logger::log_write_fmt *f = AP::logger().msg_fmt_for_name(UKFT_DEF, true);
+    if (f != nullptr) {
+        AP::logger().Safe_Write_Emit_FMT(f);
+    }
+#endif
+    // @LoggerMessage: UKFT
+    // @Description: Computation time per filter frame over N frames, measured in Replay (thread CPU time): EAvg, EMax EKF3 update (all EKF3 cores), UAvg, UMax UKF update (all UKF cores), microseconds
+    AP::logger().Write(UKFT_DEF, AP::dal().micros64(), DAL_CORE(0), time_count,
+                       float(time_sum_ns[0] * 1.0e-3 / time_count), float(time_max_ns[0] * 1.0e-3),
+                       float(time_sum_ns[1] * 1.0e-3 / time_count), float(time_max_ns[1] * 1.0e-3));
+#endif
+    memset(time_sum_ns, 0, sizeof(time_sum_ns));
+    memset(time_max_ns, 0, sizeof(time_max_ns));
+    time_count = 0;
 }
 
 void NavUKF::Log_Write_Status(void) const

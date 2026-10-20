@@ -14,6 +14,7 @@
 #include <AP_NavEKF2/AP_NavEKF2.h>
 #include <AP_NavEKF3/AP_NavEKF3.h>
 #include <AP_NavUKF/AP_NavUKF.h>
+#include <time.h>
 #endif
 
 extern const AP_HAL::HAL& hal;
@@ -440,6 +441,17 @@ void AP_DAL::writeTerrainData(float alt_m)
 
 #if APM_BUILD_TYPE(APM_BUILD_Replay)
 /*
+  thread CPU time in ns: computation time of the EKF3 and UKF updates in Replay (the HAL clock follows the log, and
+  CPU time does not count time the process waits for other processes)
+ */
+static uint64_t cpu_time_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts);
+    return uint64_t(ts.tv_sec) * 1000000000ULL + uint64_t(ts.tv_nsec);
+}
+
+/*
   handle frame message. This message triggers the EKF2/EKF3/UKF updates and logging
  */
 void AP_DAL::handle_message(const log_RFRF &msg, NavEKF2 &ekf2, NavEKF3 &ekf3, NavUKF &ukf)
@@ -451,6 +463,7 @@ void AP_DAL::handle_message(const log_RFRF &msg, NavEKF2 &ekf2, NavEKF3 &ekf3, N
       LOG_DISARMED=0. To handle this we need to record the start of the filter
      */
     const uint8_t frame_types = msg.frame_types;
+    uint32_t ekf3_ns = 0;
     if (frame_types & uint8_t(AP_DAL::FrameType::InitialiseFilterEKF2)) {
         ekf2_init_done = ekf2.InitialiseFilter();
     }
@@ -470,7 +483,9 @@ void AP_DAL::handle_message(const log_RFRF &msg, NavEKF2 &ekf2, NavEKF3 &ekf3, N
             ekf3_init_done = ekf3.InitialiseFilter();
         }
         if (ekf3_init_done) {
+            const uint64_t t0 = cpu_time_ns();
             ekf3.UpdateFilter();
+            ekf3_ns = uint32_t(cpu_time_ns() - t0);
         }
     }
     /*
@@ -479,7 +494,9 @@ void AP_DAL::handle_message(const log_RFRF &msg, NavEKF2 &ekf2, NavEKF3 &ekf3, N
      */
     if ((frame_types & uint8_t(AP_DAL::FrameType::UpdateFilterUKF)) ||
         ((frame_types & uint8_t(AP_DAL::FrameType::UpdateFilterEKF3)) && ukf.enabled())) {
+        const uint64_t t0 = cpu_time_ns();
         ukf.UpdateFilter();
+        ukf.record_timing(ekf3_ns, uint32_t(cpu_time_ns() - t0));
     }
     if (frame_types & uint8_t(AP_DAL::FrameType::LogWriteEKF2)) {
         ekf2.Log_Write();

@@ -21,6 +21,10 @@ public:
     // run one filter step; called by AP_AHRS after EKF3 and by Replay from the RFRF frame
     void UpdateFilter(void);
 
+    // computation time of one frame, measured by Replay around the EKF3 and UKF updates (thread CPU time, ns);
+    // logged as UKFT (mean and maximum over 50 frames)
+    void record_timing(uint32_t ekf3_ns, uint32_t ukf_ns);
+
     // number of UpdateFilter calls that ran (stub check for Replay)
     uint32_t frame_count() const { return _frame_count; }
 
@@ -156,6 +160,10 @@ private:
     uint8_t imu_out_logged;
     uint8_t compass_logged;
     void Log_Write_Vote_Events(void);
+    // UKFT accumulation: index 0 EKF3, 1 UKF
+    uint64_t time_sum_ns[2] {};
+    uint32_t time_max_ns[2] {};
+    uint16_t time_count;
 };
 
 #endif // HAL_NAVUKF_AVAILABLE

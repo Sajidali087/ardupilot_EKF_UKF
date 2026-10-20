@@ -1,3 +1,19 @@
+/*
+  UKF shadow estimator for ArduPilot (libraries/AP_NavUKF): one filter core
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 #include "AP_NavUKF_core.h"
 
 #if HAL_NAVUKF_AVAILABLE
@@ -960,6 +976,17 @@ void NavUKF_core::Log_Write_Innov(uint8_t type, const UpdateResult &res, bool in
     emit_fmt_in_replay(UKFN_DEF);
     // @LoggerMessage: UKFN
     // @Description: UKF shadow estimator: innovations of one update (T: 0 GPS position, 1 GPS velocity, 2 baro, 3 yaw, 4 airspeed, 5 sideslip); In: 1 if NIS is inside the 95 % bounds
+    // @Field: TimeUS: Time since system startup
+    // @Field: C: core
+    // @Field: T: measurement type: 0 GPS position, 1 GPS velocity, 2 baro, 3 yaw, 4 airspeed, 5 sideslip, 6 GPS height
+    // @Field: I0: innovation, component 0
+    // @Field: I1: innovation, component 1
+    // @Field: I2: innovation, component 2
+    // @Field: S0: innovation standard deviation, component 0
+    // @Field: S1: innovation standard deviation, component 1
+    // @Field: S2: innovation standard deviation, component 2
+    // @Field: NIS: normalised innovation squared
+    // @Field: In: 1 if NIS is inside the two-sided 95 % bounds
     ftype in[MAX_MEAS] {}, sd[MAX_MEAS] {};
     for (uint8_t j = 0; j < res.m; j++) {
         in[j] = res.innov[j];
@@ -993,6 +1020,13 @@ void NavUKF_core::Log_Write_Event(uint8_t core, uint8_t ch, uint8_t old_state, u
     emit_fmt_in_replay(UKFE_DEF);
     // @LoggerMessage: UKFE
     // @Description: UKF fault detection event: channel Ch (0 GPS pos, 1 GPS vel, 2 baro, 3 compass yaw, 4 airspeed, 5 synthetic sideslip; 6-8 IMU 0-2 and 9-10 compass 1-2 from the votes, logged with core 0) changed from Old to New (0 OK, 1 WARNING, 2 FAULT, 3 ISOLATED, 4 RECOVERING); Rsn test (1 gate, 2 CUSUM, 3 timeout, 4 quality, 5 vote, 6 consistent, 7 reset, 8 baro drift); Stat CUSUM statistic
+    // @Field: TimeUS: Time since system startup
+    // @Field: C: core (the votes are logged with core 0)
+    // @Field: Ch: channel: 0 GPS pos, 1 GPS vel, 2 baro, 3 compass yaw, 4 airspeed, 5 sideslip, 6-8 IMU 0-2, 9-10 compass 1-2
+    // @Field: Old: previous state: 0 OK, 1 WARNING, 2 FAULT, 3 ISOLATED, 4 RECOVERING
+    // @Field: New: new state
+    // @Field: Rsn: test: 1 gate, 2 CUSUM, 3 timeout, 4 quality, 5 vote, 6 consistent, 7 reset, 8 baro drift
+    // @Field: Stat: CUSUM statistic
     AP::logger().Write(UKFE_DEF, AP::dal().micros64(), core, ch, old_state, new_state, reason, stat);
 #else
     (void)core; (void)ch; (void)old_state; (void)new_state; (void)reason; (void)stat;
@@ -1006,6 +1040,17 @@ void NavUKF_core::Log_Write_Primary(void) const
     const QuaternionF qo(xout[0], xout[1], xout[2], xout[3]);
     // @LoggerMessage: UKFP
     // @Description: UKF shadow estimator output of the primary core (C: its core number), the estimator's result with three cores; same fields as UKF1
+    // @Field: TimeUS: Time since system startup
+    // @Field: C: core number of the primary core
+    // @Field: Roll: roll
+    // @Field: Pitch: pitch
+    // @Field: Yaw: yaw
+    // @Field: VN: velocity north
+    // @Field: VE: velocity east
+    // @Field: VD: velocity down
+    // @Field: PN: position north from the first GPS fix
+    // @Field: PE: position east from the first GPS fix
+    // @Field: PD: position down from the first GPS fix
     AP::logger().Write(UKFP_DEF,
                        AP::dal().micros64(), DAL_CORE(imu_index),
                        float(degrees(qo.get_euler_roll())),
@@ -1032,6 +1077,17 @@ void NavUKF_core::Log_Write(void) const
 
     // @LoggerMessage: UKF1
     // @Description: UKF shadow estimator output at the current time: attitude, velocity, position (NED from the first GPS fix)
+    // @Field: TimeUS: Time since system startup
+    // @Field: C: core: 0-2 live, 100-102 in Replay
+    // @Field: Roll: roll
+    // @Field: Pitch: pitch
+    // @Field: Yaw: yaw
+    // @Field: VN: velocity north
+    // @Field: VE: velocity east
+    // @Field: VD: velocity down
+    // @Field: PN: position north from the first GPS fix
+    // @Field: PE: position east from the first GPS fix
+    // @Field: PD: position down from the first GPS fix
     AP::logger().Write(UKF1_DEF,
                        time_us, core,
                        float(degrees(qo.get_euler_roll())),
@@ -1042,6 +1098,20 @@ void NavUKF_core::Log_Write(void) const
 
     // @LoggerMessage: UKFD
     // @Description: UKF shadow estimator state at the delayed fusion horizon: attitude, velocity, position; horizon delay (ms); buffered samples lost; measurements fused more than 1.5 steps after their time of validity
+    // @Field: TimeUS: Time since system startup
+    // @Field: C: core
+    // @Field: Roll: roll at the fusion horizon
+    // @Field: Pitch: pitch at the fusion horizon
+    // @Field: Yaw: yaw at the fusion horizon
+    // @Field: VN: velocity north at the fusion horizon
+    // @Field: VE: velocity east at the fusion horizon
+    // @Field: VD: velocity down at the fusion horizon
+    // @Field: PN: position north at the fusion horizon
+    // @Field: PE: position east at the fusion horizon
+    // @Field: PD: position down at the fusion horizon
+    // @Field: Dly: horizon delay, ms
+    // @Field: Drop: buffered samples lost
+    // @Field: Late: measurements fused more than 1.5 steps after their time of validity
     AP::logger().Write(UKFD_DEF,
                        time_us, core,
                        float(degrees(q.get_euler_roll())),
@@ -1053,6 +1123,13 @@ void NavUKF_core::Log_Write(void) const
 
     // @LoggerMessage: UKFH
     // @Description: UKF shadow estimator observability and health: ABF accel bias axes not learned (bit 0 x, 1 y, 2 z); AH filtered horizontal acceleration; BSt baro steps detected; BCH, BCL baro innovation CUSUM (high, low side)
+    // @Field: TimeUS: Time since system startup
+    // @Field: C: core
+    // @Field: ABF: accel bias axes not learned (bit 0 x, 1 y, 2 z)
+    // @Field: AH: filtered horizontal acceleration
+    // @Field: BSt: baro steps detected
+    // @Field: BCH: baro innovation CUSUM, high side
+    // @Field: BCL: baro innovation CUSUM, low side
     AP::logger().Write(UKFH_DEF,
                        time_us, core,
                        abias_frozen, float(man_accel),
@@ -1060,6 +1137,17 @@ void NavUKF_core::Log_Write(void) const
 
     // @LoggerMessage: UKF2
     // @Description: UKF shadow estimator: gyro bias, accel bias, baro bias, wind
+    // @Field: TimeUS: Time since system startup
+    // @Field: C: core
+    // @Field: GX: gyro bias X
+    // @Field: GY: gyro bias Y
+    // @Field: GZ: gyro bias Z
+    // @Field: AX: accel bias X
+    // @Field: AY: accel bias Y
+    // @Field: AZ: accel bias Z
+    // @Field: BB: baro bias
+    // @Field: WN: wind north
+    // @Field: WE: wind east
     AP::logger().Write(UKF2_DEF,
                        time_us, core,
                        float(x[10]), float(x[11]), float(x[12]),
@@ -1068,6 +1156,19 @@ void NavUKF_core::Log_Write(void) const
 
     // @LoggerMessage: UKF3
     // @Description: UKF shadow estimator: standard deviations from P and health counters
+    // @Field: TimeUS: Time since system startup
+    // @Field: C: core
+    // @Field: SR: roll standard deviation
+    // @Field: SP: pitch standard deviation
+    // @Field: SY: yaw standard deviation
+    // @Field: SVN: velocity north standard deviation
+    // @Field: SVE: velocity east standard deviation
+    // @Field: SVD: velocity down standard deviation
+    // @Field: SPN: position north standard deviation
+    // @Field: SPE: position east standard deviation
+    // @Field: SPD: position down standard deviation
+    // @Field: Reg: Cholesky regularisation retries of the last step
+    // @Field: Fail: failed sigma point sets or updates since start
     AP::logger().Write(UKF3_DEF,
                        time_us, core,
                        float(degrees(sqrtF(P[0][0]))), float(degrees(sqrtF(P[1][1]))), float(degrees(sqrtF(P[2][2]))),
@@ -1077,6 +1178,17 @@ void NavUKF_core::Log_Write(void) const
 
     // @LoggerMessage: UKFM
     // @Description: UKF shadow estimator fusion modules at 10 Hz (M: 0 velocity V1-V3 = VN, VE, VD m/s; 1 position V1, V2 = PN, PE m; 2 altitude V1 = height m, V2 = baro bias m; 3 heading V1 = yaw deg, V2 = gyro bias Z rad/s); S1-S3 their standard deviations; Src aiding sources fused in the last second (UKF_MOD_MASK bits); St 0 aided, 1 degraded, 2 unaided
+    // @Field: TimeUS: Time since system startup
+    // @Field: C: core
+    // @Field: M: module: 0 velocity, 1 position, 2 altitude, 3 heading
+    // @Field: V1: module value 1 (VN, PN, height or yaw)
+    // @Field: V2: module value 2 (VE, PE, baro bias or gyro bias Z)
+    // @Field: V3: module value 3 (VD)
+    // @Field: S1: standard deviation of V1
+    // @Field: S2: standard deviation of V2
+    // @Field: S3: standard deviation of V3
+    // @Field: Src: aiding sources fused in the last second (UKF_MOD_MASK bits)
+    // @Field: St: status: 0 aided, 1 degraded, 2 unaided
     if (module_log_div == 0) {
         emit_fmt_in_replay(UKFM_DEF);
         for (uint8_t mod = 0; mod < NUM_MOD; mod++) {

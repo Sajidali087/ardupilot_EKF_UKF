@@ -1,3 +1,19 @@
+/*
+  UKF shadow estimator for ArduPilot (libraries/AP_NavUKF): frontend (parameters, cores, votes, core selection)
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 #include "AP_NavUKF.h"
 
 #if HAL_NAVUKF_AVAILABLE
@@ -623,6 +639,13 @@ void NavUKF::record_timing(uint32_t ekf3_ns, uint32_t ukf_ns)
 #endif
     // @LoggerMessage: UKFT
     // @Description: Computation time per filter frame over N frames, measured in Replay (thread CPU time): EAvg, EMax EKF3 update (all EKF3 cores), UAvg, UMax UKF update (all UKF cores), microseconds
+    // @Field: TimeUS: Time since system startup
+    // @Field: C: core number base
+    // @Field: N: frames in this record
+    // @Field: EAvg: mean EKF3 update time, all EKF3 cores, microseconds
+    // @Field: EMax: largest EKF3 update time, microseconds
+    // @Field: UAvg: mean UKF update time, all UKF cores, microseconds
+    // @Field: UMax: largest UKF update time, microseconds
     AP::logger().Write(UKFT_DEF, AP::dal().micros64(), DAL_CORE(0), time_count,
                        float(time_sum_ns[0] * 1.0e-3 / time_count), float(time_max_ns[0] * 1.0e-3),
                        float(time_sum_ns[1] * 1.0e-3 / time_count), float(time_max_ns[1] * 1.0e-3));
@@ -648,6 +671,19 @@ void NavUKF::Log_Write_Status(void) const
     }
     // @LoggerMessage: UKFS
     // @Description: UKF redundancy at 10 Hz: Pri primary core, Sc0-Sc2 core scores (NIS per degree of freedom, filtered), IU IMUs delivering data, IV IMUs voted out, MI compass vote (0 both used, 1 compass 1 isolated, 2 compass 2 isolated, 3 yaw fusion suspended), NSw primary switches, H0-H2 health of cores 0-2 (bit ch: channel ch not OK: 0 GPS pos, 1 GPS vel, 2 baro, 3 compass yaw, 4 airspeed, 5 sideslip)
+    // @Field: TimeUS: Time since system startup
+    // @Field: C: core number base (0 live, 100 in Replay)
+    // @Field: Pri: primary core
+    // @Field: Sc0: score of core 0 (filtered NIS per degree of freedom)
+    // @Field: Sc1: score of core 1
+    // @Field: Sc2: score of core 2
+    // @Field: IU: IMUs delivering data (bitmask)
+    // @Field: IV: IMUs voted out (bitmask)
+    // @Field: MI: compass vote: 0 both used, 1 compass 1 isolated, 2 compass 2 isolated, 3 yaw fusion suspended
+    // @Field: NSw: primary core switches since start
+    // @Field: H0: health of core 0: bit ch set when channel ch is not OK
+    // @Field: H1: health of core 1
+    // @Field: H2: health of core 2
     AP::logger().Write(UKFS_DEF,
                        AP::dal().micros64(), DAL_CORE(0), primary,
                        float(cores[0].score()), float(cores[1].score()), float(cores[2].score()),

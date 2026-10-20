@@ -1,3 +1,19 @@
+/*
+  UKF shadow estimator for ArduPilot (libraries/AP_NavUKF): delayed fusion horizon buffers
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
 #pragma once
 
 /*
@@ -21,7 +37,6 @@ public:
     uint8_t size(void) const { return _count; }
     bool empty(void) const { return _count == 0; }
     bool full(void) const { return _count == N; }
-    static constexpr uint8_t capacity(void) { return N; }
 
     // append e as the newest element; when full the oldest is overwritten and false is returned
     bool push(const T &e) {

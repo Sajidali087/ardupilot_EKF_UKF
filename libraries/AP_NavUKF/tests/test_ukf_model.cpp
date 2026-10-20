@@ -1,4 +1,20 @@
 /*
+  UKF shadow estimator for ArduPilot (libraries/AP_NavUKF): unit tests
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+/*
   unit tests for the UKF models (Step 11 items 4 and 5)
   checks planned in docs/ukf_state_model.md Sections 3 and 11:
   tilt and yaw alignment, hover with zero drift, constant yaw rate, constant acceleration
@@ -236,6 +252,36 @@ TEST(UKFModel, GpsHeightOnly)
     ftype z[UKFMath::MAX_MEAS];
     EXPECT_EQ(measure(Meas::GPS_HGT, x, z, false), 1);
     EXPECT_NEAR(z[0], ftype(-95), TOL);
+}
+
+TEST(UKFModel, MeasurementModelsBasic)
+{
+    // GPS position and velocity (3D and 2D), baro with its bias, yaw of the attitude (Step 11 models)
+    ftype x[NUM_STATES];
+    state_from_euler(x, ftype(0.1), ftype(-0.2), ftype(2.5));
+    x[4] = 21; x[5] = -4; x[6] = ftype(1.5);
+    x[7] = 120; x[8] = -35; x[9] = -80;
+    x[16] = ftype(1.25);
+    ftype z[UKFMath::MAX_MEAS];
+    EXPECT_EQ(measure(Meas::GPS_POS, x, z, true), 3);
+    EXPECT_NEAR(z[0], ftype(120), TOL);
+    EXPECT_NEAR(z[1], ftype(-35), TOL);
+    EXPECT_NEAR(z[2], ftype(-80), TOL);
+    EXPECT_EQ(measure(Meas::GPS_POS, x, z, false), 2);
+    EXPECT_EQ(measure(Meas::GPS_VEL, x, z, true), 3);
+    EXPECT_NEAR(z[0], ftype(21), TOL);
+    EXPECT_NEAR(z[1], ftype(-4), TOL);
+    EXPECT_NEAR(z[2], ftype(1.5), TOL);
+    EXPECT_EQ(measure(Meas::GPS_VEL, x, z, false), 2);
+    // baro altitude is up: -p_D plus the baro bias
+    EXPECT_EQ(measure(Meas::BARO, x, z, false), 1);
+    EXPECT_NEAR(z[0], ftype(81.25), TOL);
+    // yaw of the attitude, independent of roll and pitch, wrapped to (-pi, pi]
+    EXPECT_EQ(measure(Meas::YAW, x, z, false), 1);
+    EXPECT_NEAR(z[0], ftype(2.5), TOL);
+    EXPECT_NEAR(yaw_of_state(x), ftype(2.5), TOL);
+    state_from_euler(x, ftype(0.3), ftype(0.2), ftype(-3));
+    EXPECT_NEAR(yaw_of_state(x), ftype(-3), TOL);
 }
 
 TEST(UKFModel, MedianVote)

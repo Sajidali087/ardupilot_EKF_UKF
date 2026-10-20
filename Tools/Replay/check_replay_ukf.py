@@ -78,7 +78,7 @@ def check_log(logfile, progress=print, verbose=False, accuracy=0.0, ignores=set(
             base_counts[mtype] += 1
             continue
         key = msg_key(m)
-        key = (key[0]-100, key[1]) if isinstance(key, tuple) else key-100
+        key = (key[0]-100,) + key[1:] if isinstance(key, tuple) else key-100
         mb = base[mtype].get(key)
         if mb is None:
             continue

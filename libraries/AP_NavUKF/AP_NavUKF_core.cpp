@@ -977,14 +977,25 @@ void NavUKF_core::Log_Write_Innov(uint8_t type, const UpdateResult &res, bool in
 
 void NavUKF_core::Log_Write_Health_Event(uint8_t ch, UKFHealth::State old_state) const
 {
+    Log_Write_Event(DAL_CORE(imu_index), ch, uint8_t(old_state), uint8_t(health[ch].state()),
+                    uint8_t(health[ch].reason()), float(health[ch].statistic()));
+}
+
+void NavUKF_core::Log_Write_Event(uint8_t core, uint8_t ch, uint8_t old_state, uint8_t new_state, uint8_t reason,
+                                  float stat)
+{
+    /*
+      the only writer of UKFE: AP_Logger maps a message name to its format by the address of the name string, so a
+      second Write site with its own "UKFE" literal (in another file) creates a second format id with the same name;
+      readers that select by type id then miss part of the records
+     */
 #if HAL_LOGGING_ENABLED
     emit_fmt_in_replay(UKFE_DEF);
     // @LoggerMessage: UKFE
     // @Description: UKF fault detection event: channel Ch (0 GPS pos, 1 GPS vel, 2 baro, 3 compass yaw, 4 airspeed, 5 synthetic sideslip; 6-8 IMU 0-2 and 9-10 compass 1-2 from the votes, logged with core 0) changed from Old to New (0 OK, 1 WARNING, 2 FAULT, 3 ISOLATED, 4 RECOVERING); Rsn test (1 gate, 2 CUSUM, 3 timeout, 4 quality, 5 vote, 6 consistent, 7 reset, 8 baro drift); Stat CUSUM statistic
-    AP::logger().Write(UKFE_DEF, AP::dal().micros64(), DAL_CORE(imu_index), ch, uint8_t(old_state),
-                       uint8_t(health[ch].state()), uint8_t(health[ch].reason()), float(health[ch].statistic()));
+    AP::logger().Write(UKFE_DEF, AP::dal().micros64(), core, ch, old_state, new_state, reason, stat);
 #else
-    (void)ch; (void)old_state;
+    (void)core; (void)ch; (void)old_state; (void)new_state; (void)reason; (void)stat;
 #endif
 }
 

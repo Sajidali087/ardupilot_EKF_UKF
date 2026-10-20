@@ -65,11 +65,16 @@ def check_log(logfile, progress=print, verbose=False, accuracy=0.0, ignores=set(
     base = {m: {} for m in UKF_LIST}
 
     mlog = mavutil.mavlink_connection(logfile)
+    wanted = set(UKF_LIST)
     while True:
-        m = mlog.recv_match(type=UKF_LIST)
+        # every record, filtered by name: a log can hold two FMT ids for one message name (UKFE written from two
+        # places before 2026-10-20), and a type-filtered read returns only one of them
+        m = mlog.recv_match()
         if m is None:
             break
         mtype = m.get_type()
+        if mtype not in wanted:
+            continue
         counts.setdefault(mtype, 0)
         base_counts.setdefault(mtype, 0)
         if m.C < 100:
@@ -107,11 +112,12 @@ def replayed_ukf(logfile):
     '''generator of replayed UKF messages (core >= 100) in log order; with --core only that core'''
     from pymavlink import mavutil
     mlog = mavutil.mavlink_connection(logfile)
+    wanted = set(UKF_LIST)
     while True:
-        m = mlog.recv_match(type=UKF_LIST)
+        m = mlog.recv_match()
         if m is None:
             return
-        if m.C >= 100 and (ONLY_CORE is None or m.C == 100 + ONLY_CORE):
+        if m.get_type() in wanted and m.C >= 100 and (ONLY_CORE is None or m.C == 100 + ONLY_CORE):
             yield m
 
 

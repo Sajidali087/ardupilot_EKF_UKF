@@ -587,22 +587,16 @@ void NavUKF::UpdateFilter(void)
 void NavUKF::Log_Write_Vote_Events(void)
 {
 #if HAL_LOGGING_ENABLED
-#define UKFE_VOTE_DEF "UKFE", "TimeUS,C,Ch,Old,New,Rsn,Stat", "s#-----", "F-00000", "QBBBBBf"
     for (uint8_t i = 0; i < 5; i++) {
         const bool now_out = (i < 3) ? (imu_out & (1U << i)) : (compass_isolated & (1U << (i - 3)));
         const bool was_out = (i < 3) ? (imu_out_logged & (1U << i)) : (compass_logged & (1U << (i - 3)));
         if (now_out == was_out) {
             continue;
         }
-#if APM_BUILD_TYPE(APM_BUILD_Replay)
-        AP_Logger::log_write_fmt *f = AP::logger().msg_fmt_for_name(UKFE_VOTE_DEF, true);
-        if (f != nullptr) {
-            AP::logger().Safe_Write_Emit_FMT(f);
-        }
-#endif
-        // the vote channels change between OK (0) and ISOLATED (3), test "vote" (5)
-        AP::logger().Write(UKFE_VOTE_DEF, AP::dal().micros64(), DAL_CORE(0), uint8_t(NavUKF_core::NUM_CH + i),
-                           uint8_t(was_out ? 3 : 0), uint8_t(now_out ? 3 : 0), uint8_t(5), 0.0f);
+        // the vote channels change between OK (0) and ISOLATED (3), test "vote" (5); written through the one UKFE
+        // writer so that a log holds a single UKFE format
+        NavUKF_core::Log_Write_Event(DAL_CORE(0), uint8_t(NavUKF_core::NUM_CH + i), uint8_t(was_out ? 3 : 0),
+                                     uint8_t(now_out ? 3 : 0), uint8_t(5), 0.0f);
     }
 #endif
     imu_out_logged = imu_out;

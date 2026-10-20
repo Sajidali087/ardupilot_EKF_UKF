@@ -31,6 +31,9 @@ public:
     // fault detection (Step 20): sensor channels monitored by each core
     enum HealthChannel : uint8_t { CH_GPS_POS = 0, CH_GPS_VEL = 1, CH_BARO = 2, CH_YAW = 3, CH_AIRSPEED = 4, CH_SIDESLIP = 5, NUM_CH = 6 };
     static const char *channel_name(uint8_t ch);
+    // the single UKFE writer (channel state changes of the cores and the votes of the frontend)
+    static void Log_Write_Event(uint8_t core, uint8_t ch, uint8_t old_state, uint8_t new_state, uint8_t reason,
+                                float stat);
     const UKFHealth::Channel &channel(uint8_t ch) const { return health[ch]; }
     // bit ch set: channel ch not OK
     uint8_t health_mask(void) const;

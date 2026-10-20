@@ -521,7 +521,7 @@ void NavUKF_core::fuse_airspeed(const AirSample &a)
         // synthetic measurement: no lateral body airspeed in coordinated flight
         const ftype zs[MAX_MEAS] = { 0, 0, 0 };
         const ftype ss[MAX_MEAS] = { r.sideslip, 0, 0 };
-        fuse(UKFModel::Meas::SIDESLIP, 1, zs, ss);
+        fuse(UKFModel::Meas::SIDESLIP, 1, zs, ss, nullptr, CH_SIDESLIP);
     }
 }
 
@@ -753,7 +753,7 @@ void NavUKF_core::reset_from(const NavUKF_core &src)
 
 const char *NavUKF_core::channel_name(uint8_t ch)
 {
-    static const char *names[NUM_CH] = { "GPS pos", "GPS vel", "baro", "compass yaw", "airspeed" };
+    static const char *names[NUM_CH] = { "GPS pos", "GPS vel", "baro", "compass yaw", "airspeed", "sideslip" };
     return ch < NUM_CH ? names[ch] : "?";
 }
 
@@ -775,13 +775,14 @@ UKFHealth::Config NavUKF_core::health_config(uint8_t ch) const
       (p2_ref_02, S1, baseline, p2_w1_wind, S3; ukf_state_model.md Section 17) and scaled by UKF_FD_GATE (sigma)
       and UKF_FD_CUSUM; GPS velocity is wide because the default GPS delay leaves a 140 ms timing mismatch
      */
-    static const float gate[NUM_CH] = { 25, 2025, 144, 25, 25 };
-    static const float cusum_h[NUM_CH] = { 30, 500, 50, 60, 20 };
-    static const uint16_t timeout_ms[NUM_CH] = { 1000, 1000, 500, 500, 500 };
+    static const float gate[NUM_CH] = { 25, 2025, 144, 25, 25, 25 };
+    static const float cusum_h[NUM_CH] = { 30, 500, 50, 60, 20, 20 };
+    static const uint16_t timeout_ms[NUM_CH] = { 1000, 1000, 500, 500, 500, 500 };
     /*
       re-admission with a covariance reset: GPS (the state drifts while it is excluded) and baro (its bias re-learns a
-      persistent offset); compass yaw and airspeed only while GPS position is not healthy: with GPS the state is
-      anchored, so a persistent disagreement is the sensor and a reset would absorb the fault into yaw or wind
+      persistent offset); compass yaw, airspeed and sideslip only while GPS position is not healthy: with GPS the
+      state is anchored, so a persistent disagreement is the sensor (or uncoordinated flight) and a reset would absorb
+      it into yaw or wind
      */
     const UKFHealth::State gps_state = health[CH_GPS_POS].state();
     const bool gps_anchor = gps_state == UKFHealth::State::OK || gps_state == UKFHealth::State::WARNING ||
@@ -794,7 +795,7 @@ UKFHealth::Config NavUKF_core::health_config(uint8_t ch) const
     c.cusum_h = ftype(cusum_h[ch]) * frontend.fd_cusum_scale();
     c.timeout_ms = timeout_ms[ch];
     c.recov_ms = frontend.fd_recov_ms();
-    c.reset_ms = ((ch == CH_YAW || ch == CH_AIRSPEED) && gps_anchor) ? 0 : frontend.fd_reset_ms();
+    c.reset_ms = ((ch == CH_YAW || ch == CH_AIRSPEED || ch == CH_SIDESLIP) && gps_anchor) ? 0 : frontend.fd_reset_ms();
     return c;
 }
 
@@ -823,6 +824,7 @@ void NavUKF_core::inflate_for_channel(uint8_t ch, const UpdateResult &res, UKFMo
         P[2][2] += sq(res.innov[0]);
         break;
     case CH_AIRSPEED:
+    case CH_SIDESLIP:
         P[16][16] += sq(res.innov[0]);
         P[17][17] += sq(res.innov[0]);
         break;
@@ -847,6 +849,7 @@ void NavUKF_core::health_tick(uint32_t now_ms)
         frontend.source_enabled(SRC_BARO),
         frontend.source_enabled(SRC_COMPASS) && (frontend.compass_allowed(0) || frontend.compass_allowed(1)),
         arsp_due,
+        false,      // sideslip: synthetic, generated with every airspeed sample, no timeout
     };
     // baro drift: the bias state takes up a drift, so the innovations stay small; the bias rate shows it
     const ftype dt = (health_tick_ms != 0 && now_ms > health_tick_ms) ? ftype(now_ms - health_tick_ms) * ftype(0.001) : ftype(0);
@@ -856,7 +859,7 @@ void NavUKF_core::health_tick(uint32_t now_ms)
     baro_bias_prev = x[16];
     health_tick_ms = now_ms;
     const bool baro_ok = fabsF(baro_bias_rate) < ftype(BARO_DRIFT_RATE);
-    const bool quality[NUM_CH] = { gps_quality, gps_quality, baro_ok, true, true };
+    const bool quality[NUM_CH] = { gps_quality, gps_quality, baro_ok, true, true, true };
     for (uint8_t ch = 0; ch < NUM_CH; ch++) {
         health[ch].on_tick(now_ms, quality[ch], health_config(ch), expected[ch],
                            ch == CH_BARO ? UKFHealth::Reason::DRIFT : UKFHealth::Reason::QUALITY);
@@ -977,7 +980,7 @@ void NavUKF_core::Log_Write_Health_Event(uint8_t ch, UKFHealth::State old_state)
 #if HAL_LOGGING_ENABLED
     emit_fmt_in_replay(UKFE_DEF);
     // @LoggerMessage: UKFE
-    // @Description: UKF fault detection event: channel Ch (0 GPS pos, 1 GPS vel, 2 baro, 3 compass yaw, 4 airspeed; 5-7 IMU 0-2 and 8-9 compass 1-2 from the votes, C = core 0) changed from Old to New (0 OK, 1 WARNING, 2 FAULT, 3 ISOLATED, 4 RECOVERING); Rsn test (1 gate, 2 CUSUM, 3 timeout, 4 quality, 5 vote, 6 consistent, 7 reset, 8 baro drift); Stat CUSUM statistic
+    // @Description: UKF fault detection event: channel Ch (0 GPS pos, 1 GPS vel, 2 baro, 3 compass yaw, 4 airspeed, 5 synthetic sideslip; 6-8 IMU 0-2 and 9-10 compass 1-2 from the votes, logged with core 0) changed from Old to New (0 OK, 1 WARNING, 2 FAULT, 3 ISOLATED, 4 RECOVERING); Rsn test (1 gate, 2 CUSUM, 3 timeout, 4 quality, 5 vote, 6 consistent, 7 reset, 8 baro drift); Stat CUSUM statistic
     AP::logger().Write(UKFE_DEF, AP::dal().micros64(), DAL_CORE(imu_index), ch, uint8_t(old_state),
                        uint8_t(health[ch].state()), uint8_t(health[ch].reason()), float(health[ch].statistic()));
 #else

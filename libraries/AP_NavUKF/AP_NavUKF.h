@@ -152,7 +152,7 @@ private:
     uint8_t better_core;
     uint8_t log_div;
     void Log_Write_Status(void) const;
-    // vote changes as fault-detection events (UKFE channels 5-9)
+    // vote changes as fault-detection events (UKFE channels 6-10)
     uint8_t imu_out_logged;
     uint8_t compass_logged;
     void Log_Write_Vote_Events(void);

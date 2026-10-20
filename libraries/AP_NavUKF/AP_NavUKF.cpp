@@ -195,10 +195,10 @@ const AP_Param::GroupInfo NavUKF::var_info[] = {
 
     // @Param: SSLIP_EN
     // @DisplayName: Synthetic sideslip update
-    // @Description: Fuse a zero lateral body airspeed with every airspeed sample (fixed wing in coordinated flight)
+    // @Description: Fuse a zero lateral body airspeed with every airspeed sample (fixed wing in coordinated flight); on by default, as EKF3 does for planes
     // @Values: 0:Disabled,1:Enabled
     // @User: Advanced
-    AP_GROUPINFO("SSLIP_EN", 22, NavUKF, _sslip_en, 0),
+    AP_GROUPINFO("SSLIP_EN", 22, NavUKF, _sslip_en, 1),
 
     // @Param: SSLIP_NSE
     // @DisplayName: Synthetic sideslip noise
@@ -600,7 +600,7 @@ void NavUKF::Log_Write_Vote_Events(void)
         }
 #endif
         // the vote channels change between OK (0) and ISOLATED (3), test "vote" (5)
-        AP::logger().Write(UKFE_VOTE_DEF, AP::dal().micros64(), DAL_CORE(0), uint8_t(5 + i),
+        AP::logger().Write(UKFE_VOTE_DEF, AP::dal().micros64(), DAL_CORE(0), uint8_t(NavUKF_core::NUM_CH + i),
                            uint8_t(was_out ? 3 : 0), uint8_t(now_out ? 3 : 0), uint8_t(5), 0.0f);
     }
 #endif
@@ -623,7 +623,7 @@ void NavUKF::Log_Write_Status(void) const
         usable |= imu_usable[i] ? (1U << i) : 0;
     }
     // @LoggerMessage: UKFS
-    // @Description: UKF redundancy at 10 Hz: Pri primary core, Sc0-Sc2 core scores (NIS per degree of freedom, filtered), IU IMUs delivering data, IV IMUs voted out, MI compass vote (0 both used, 1 compass 1 isolated, 2 compass 2 isolated, 3 yaw fusion suspended), NSw primary switches, H0-H2 health of cores 0-2 (bit ch: channel ch not OK: 0 GPS pos, 1 GPS vel, 2 baro, 3 compass yaw, 4 airspeed)
+    // @Description: UKF redundancy at 10 Hz: Pri primary core, Sc0-Sc2 core scores (NIS per degree of freedom, filtered), IU IMUs delivering data, IV IMUs voted out, MI compass vote (0 both used, 1 compass 1 isolated, 2 compass 2 isolated, 3 yaw fusion suspended), NSw primary switches, H0-H2 health of cores 0-2 (bit ch: channel ch not OK: 0 GPS pos, 1 GPS vel, 2 baro, 3 compass yaw, 4 airspeed, 5 sideslip)
     AP::logger().Write(UKFS_DEF,
                        AP::dal().micros64(), DAL_CORE(0), primary,
                        float(cores[0].score()), float(cores[1].score()), float(cores[2].score()),

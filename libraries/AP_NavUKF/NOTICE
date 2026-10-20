@@ -1,0 +1,13 @@
+UKF shadow estimator for ArduPilot (libraries/AP_NavUKF)
+
+Copyright (C) 2026 the Client, the party that commissioned this work.
+
+This library was developed under contract for the Client. Copyright in it belongs to the Client; the Client's legal
+name is the one given in the project agreement.
+
+The library is a derived work of ArduPilot and is licensed under the GNU General Public License, version 3 or (at your
+option) any later version. The licence text is COPYING.txt at the top of this repository. As the GPL requires, anyone
+who receives a binary built from this code is entitled to its source code under the same licence.
+
+The changes this project made to ArduPilot files outside this directory (build, ArduPlane parameters, AHRS, DAL,
+Replay) are covered by the copyright notices and licence of those files.

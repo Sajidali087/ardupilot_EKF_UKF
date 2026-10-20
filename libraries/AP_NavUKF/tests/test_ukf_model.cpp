@@ -1,6 +1,8 @@
 /*
   UKF shadow estimator for ArduPilot (libraries/AP_NavUKF): unit tests
 
+  Copyright (C) 2026 the Client, the party that commissioned this work (see NOTICE in this directory).
+
   This program is free software: you can redistribute it and/or modify
   it under the terms of the GNU General Public License as published by
   the Free Software Foundation, either version 3 of the License, or

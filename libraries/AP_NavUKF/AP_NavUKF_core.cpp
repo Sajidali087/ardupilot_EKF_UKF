@@ -7,6 +7,7 @@
 #include <AP_DAL/AP_DAL.h>
 #include <AP_Logger/AP_Logger.h>
 #include <AP_Vehicle/AP_Vehicle_Type.h>
+#include <GCS_MAVLink/GCS.h>
 
 using namespace UKFMath;
 
@@ -42,8 +43,10 @@ static constexpr float MAN_RATE = 0.1f;             // rad/s, rotation rate that
 static constexpr float BARO_CUSUM_K = 1.0f;         // allowance, innovation standard deviations
 static constexpr float BARO_CUSUM_H = 50.0f;        // decision threshold
 
-static constexpr uint16_t HORIZON_MARGIN_MS = 60;
-static constexpr float SCORE_ALPHA = 0.005f;        // low-pass factor of the core selection score per update   // a sample reaches the DAL up to 57 ms after its stamp (GPS; baro and compass 21 ms; S1)
+static constexpr uint16_t HORIZON_MARGIN_MS = 60;   // a sample reaches the DAL up to 57 ms after its stamp (GPS; baro and compass 21 ms; S1)
+static constexpr float SCORE_ALPHA = 0.005f;        // low-pass factor of the core selection score per update
+static constexpr float BARO_DRIFT_RATE = 0.1f;      // m/s, baro bias rate that raises a drift WARNING (fault-free logs up to 0.054 after take-off)
+static constexpr float BARO_DRIFT_TAU = 20.0f;      // s, low-pass of the baro bias rate
 static constexpr float OUTPUT_TAU = 0.25f;          // s, output velocity and position tracking time constant (EKF3 EK3_TAU_OUTPUT default)
 
 bool NavUKF_core::read_imu(Vector3F &dAng, ftype &dtA, Vector3F &dVel, ftype &dtV) const
@@ -193,6 +196,12 @@ void NavUKF_core::try_initialise(const Vector3F &dAng, ftype dtA, const Vector3F
     memset(last_src_fuse_us, 0, sizeof(last_src_fuse_us));
     module_log_div = 0;
     nis_score = 1;
+    for (uint8_t ch = 0; ch < NUM_CH; ch++) {
+        health[ch].reset();
+    }
+    baro_bias_prev = 0;
+    baro_bias_rate = 0;
+    health_tick_ms = 0;
     man_accel = 0;
     man_rate = 0;
     baro_cusum_hi = 0;
@@ -338,27 +347,54 @@ bool NavUKF_core::read_mag(Vector3F &mag, uint32_t &update_us) const
 }
 
 bool NavUKF_core::fuse(UKFModel::Meas t, uint8_t m, const ftype z[MAX_MEAS], const ftype sd[MAX_MEAS],
-                       UpdateResult *result)
+                       UpdateResult *result, int8_t ch)
 {
-    // fresh sigma points around the current estimate (ukf_state_model.md Section 4)
-    if (!sigma_points(x, P, weights, chi, L, last_regularised)) {
-        sigma_fail_count++;
-        return false;
-    }
     const bool vertical = (m == 3);
-    for (uint8_t i = 0; i < NUM_SIGMA; i++) {
-        UKFModel::measure(t, chi[i], Z[i], vertical);
-    }
     ftype R[MAX_MEAS] {};
     for (uint8_t j = 0; j < m; j++) {
         R[j] = sd[j] * sd[j];
     }
     const uint8_t angle_mask = (t == UKFModel::Meas::YAW) ? 1 : 0;
+    // the update is computed on a copy; it is committed only if the health channel allows the sample
+    static ftype xt[NUM_STATES];
+    static ftype Pt[NUM_ERR][NUM_ERR];
     UpdateResult res;
-    if (!unscented_update(x, P, weights, chi, Z, m, z, R, angle_mask, res, uint32_t(abias_frozen) << 12)) {
-        sigma_fail_count++;
-        return false;
+    for (uint8_t attempt = 0; attempt < 2; attempt++) {
+        // fresh sigma points around the current estimate (ukf_state_model.md Section 4)
+        if (!sigma_points(x, P, weights, chi, L, last_regularised)) {
+            sigma_fail_count++;
+            return false;
+        }
+        for (uint8_t i = 0; i < NUM_SIGMA; i++) {
+            UKFModel::measure(t, chi[i], Z[i], vertical);
+        }
+        memcpy(xt, x, sizeof(xt));
+        memcpy(Pt, P, sizeof(Pt));
+        if (!unscented_update(xt, Pt, weights, chi, Z, m, z, R, angle_mask, res, uint32_t(abias_frozen) << 12)) {
+            sigma_fail_count++;
+            return false;
+        }
+        if (attempt == 1 || ch < 0 || !frontend.fd_enabled()) {
+            break;
+        }
+        ftype r[MAX_MEAS] {};
+        for (uint8_t j = 0; j < m; j++) {
+            r[j] = res.innov_sd[j] > 0 ? res.innov[j] / res.innov_sd[j] : ftype(0);
+        }
+        const UKFHealth::Decision d = health[ch].on_sample(r, m, res.nis, AP::dal().millis(), health_config(ch));
+        if (d == UKFHealth::Decision::REJECT) {
+            // not fused: innovations still logged and counted
+            Log_Write_Innov(uint8_t(t), res, false);
+            return false;
+        }
+        if (d == UKFHealth::Decision::FUSE) {
+            break;
+        }
+        // re-admission after a timeout or a long isolation: open the covariance, then fuse
+        inflate_for_channel(uint8_t(ch), res, t);
     }
+    memcpy(x, xt, sizeof(xt));
+    memcpy(P, Pt, sizeof(Pt));
     const bool inside = UKFModel::nis_inside_bounds(res.nis, m);
     // core selection score: NIS per degree of freedom, time constant about 5 s at 40 updates per second
     nis_score += (MIN(res.nis / ftype(m), ftype(100)) - nis_score) * ftype(SCORE_ALPHA);
@@ -401,7 +437,7 @@ void NavUKF_core::fuse_gps(const GpsSample &g)
     if (hpos) {
         const ftype zp[MAX_MEAS] = { g.pos[0], g.pos[1], g.pos[2] };
         const ftype sp[MAX_MEAS] = { g.sd_pos_h, g.sd_pos_h, g.sd_pos_v };
-        if (fuse(UKFModel::Meas::GPS_POS, hgt ? 3 : 2, zp, sp)) {
+        if (fuse(UKFModel::Meas::GPS_POS, hgt ? 3 : 2, zp, sp, nullptr, CH_GPS_POS)) {
             last_src_fuse_us[SRC_GPS_HPOS] = horizon_us;
             if (hgt) {
                 last_src_fuse_us[SRC_GPS_HGT] = horizon_us;
@@ -410,7 +446,7 @@ void NavUKF_core::fuse_gps(const GpsSample &g)
     } else if (hgt) {
         const ftype zh[MAX_MEAS] = { g.pos[2], 0, 0 };
         const ftype sh[MAX_MEAS] = { g.sd_pos_v, 0, 0 };
-        if (fuse(UKFModel::Meas::GPS_HGT, 1, zh, sh)) {
+        if (fuse(UKFModel::Meas::GPS_HGT, 1, zh, sh, nullptr, CH_GPS_POS)) {
             last_src_fuse_us[SRC_GPS_HGT] = horizon_us;
         }
     }
@@ -419,7 +455,7 @@ void NavUKF_core::fuse_gps(const GpsSample &g)
     if (frontend.source_enabled(SRC_GPS_VEL)) {
         const ftype zv[MAX_MEAS] = { g.vel[0], g.vel[1], g.vel[2] };
         const ftype sdv[MAX_MEAS] = { g.sd_vel, g.sd_vel, g.sd_vel };
-        if (fuse(UKFModel::Meas::GPS_VEL, g.have_vz ? 3 : 2, zv, sdv)) {
+        if (fuse(UKFModel::Meas::GPS_VEL, g.have_vz ? 3 : 2, zv, sdv, nullptr, CH_GPS_VEL)) {
             last_src_fuse_us[SRC_GPS_VEL] = horizon_us;
         }
     }
@@ -439,7 +475,7 @@ void NavUKF_core::fuse_baro(const BaroSample &b)
     const ftype z[MAX_MEAS] = { b.alt - baro_ref, 0, 0 };
     const ftype sd[MAX_MEAS] = { frontend.meas_noise().baro, 0, 0 };
     UpdateResult res;
-    if (fuse(UKFModel::Meas::BARO, 1, z, sd, &res)) {
+    if (fuse(UKFModel::Meas::BARO, 1, z, sd, &res, CH_BARO)) {
         last_src_fuse_us[SRC_BARO] = horizon_us;
         baro_step_check(res);
     }
@@ -456,7 +492,7 @@ void NavUKF_core::fuse_yaw(const MagSample &m)
                                              AP::dal().compass().get_declination());
     const ftype z[MAX_MEAS] = { yaw, 0, 0 };
     const ftype sd[MAX_MEAS] = { frontend.meas_noise().yaw, 0, 0 };
-    if (fuse(UKFModel::Meas::YAW, 1, z, sd)) {
+    if (fuse(UKFModel::Meas::YAW, 1, z, sd, nullptr, CH_YAW)) {
         last_src_fuse_us[SRC_COMPASS] = horizon_us;
     }
 }
@@ -478,7 +514,7 @@ void NavUKF_core::fuse_airspeed(const AirSample &a)
     const UKFModel::MeasNoise r = frontend.meas_noise();
     const ftype z[MAX_MEAS] = { a.tas, 0, 0 };
     const ftype sd[MAX_MEAS] = { r.airspeed, 0, 0 };
-    if (fuse(UKFModel::Meas::AIRSPEED, 1, z, sd)) {
+    if (fuse(UKFModel::Meas::AIRSPEED, 1, z, sd, nullptr, CH_AIRSPEED)) {
         last_src_fuse_us[SRC_AIRSPEED] = horizon_us;
     }
     if (frontend.sideslip_enabled()) {
@@ -613,7 +649,10 @@ void NavUKF_core::predict(const Vector3F &dAng, ftype dtA, const Vector3F &dVel,
     }
     unscented_mean(chi, weights, x);
     unscented_covariance(chi, x, weights, P);
-    UKFModel::add_process_noise(P, frontend.process_noise(), dtA, dtV, abias_frozen);
+    // wind gradient: the wind may change faster in climbs and descents (EKF3 EK3_WIND_PSCALE)
+    UKFModel::ProcessNoise q = frontend.process_noise();
+    q.wind *= ftype(1) + frontend.wind_pscale() * fabsF(x[6]);
+    UKFModel::add_process_noise(P, q, dtA, dtV, abias_frozen);
 }
 
 NavUKF_core::ModuleStatus NavUKF_core::module_status(Module mod, uint8_t &src_in_use) const
@@ -703,11 +742,142 @@ void NavUKF_core::reset_from(const NavUKF_core &src)
     P[13][13] = sq(ftype(INIT_SIG_ACCEL_BIAS_XY));
     P[14][14] = sq(ftype(INIT_SIG_ACCEL_BIAS_Z));
     reset_alignment();
+    for (uint8_t ch = 0; ch < NUM_CH; ch++) {
+        health[ch].reset();
+    }
+    baro_bias_prev = x[16];
+    baro_bias_rate = 0;
+    health_tick_ms = 0;
     _initialised = src._initialised;
 }
 
-void NavUKF_core::update(bool imu_usable)
+const char *NavUKF_core::channel_name(uint8_t ch)
 {
+    static const char *names[NUM_CH] = { "GPS pos", "GPS vel", "baro", "compass yaw", "airspeed" };
+    return ch < NUM_CH ? names[ch] : "?";
+}
+
+uint8_t NavUKF_core::health_mask(void) const
+{
+    uint8_t mask = 0;
+    for (uint8_t ch = 0; ch < NUM_CH; ch++) {
+        if (health[ch].state() != UKFHealth::State::OK) {
+            mask |= (1U << ch);
+        }
+    }
+    return mask;
+}
+
+UKFHealth::Config NavUKF_core::health_config(uint8_t ch) const
+{
+    /*
+      gate (NIS per degree of freedom) and CUSUM threshold per channel, set on the fault-free logs
+      (p2_ref_02, S1, baseline, p2_w1_wind, S3; ukf_state_model.md Section 17) and scaled by UKF_FD_GATE (sigma)
+      and UKF_FD_CUSUM; GPS velocity is wide because the default GPS delay leaves a 140 ms timing mismatch
+     */
+    static const float gate[NUM_CH] = { 25, 2025, 144, 25, 25 };
+    static const float cusum_h[NUM_CH] = { 30, 500, 50, 60, 20 };
+    static const uint16_t timeout_ms[NUM_CH] = { 1000, 1000, 500, 500, 500 };
+    /*
+      re-admission with a covariance reset: GPS (the state drifts while it is excluded) and baro (its bias re-learns a
+      persistent offset); compass yaw and airspeed only while GPS position is not healthy: with GPS the state is
+      anchored, so a persistent disagreement is the sensor and a reset would absorb the fault into yaw or wind
+     */
+    const UKFHealth::State gps_state = health[CH_GPS_POS].state();
+    const bool gps_anchor = gps_state == UKFHealth::State::OK || gps_state == UKFHealth::State::WARNING ||
+                            gps_state == UKFHealth::State::RECOVERING;
+    UKFHealth::Config c;
+    c.gate = ftype(gate[ch]) * sq(frontend.fd_gate_scale());
+    c.k = frontend.fd_k();
+    c.n = frontend.fd_n();
+    c.cusum_k = 3;
+    c.cusum_h = ftype(cusum_h[ch]) * frontend.fd_cusum_scale();
+    c.timeout_ms = timeout_ms[ch];
+    c.recov_ms = frontend.fd_recov_ms();
+    c.reset_ms = ((ch == CH_YAW || ch == CH_AIRSPEED) && gps_anchor) ? 0 : frontend.fd_reset_ms();
+    return c;
+}
+
+void NavUKF_core::inflate_for_channel(uint8_t ch, const UpdateResult &res, UKFModel::Meas t)
+{
+    switch (ch) {
+    case CH_GPS_POS:
+        if (t == UKFModel::Meas::GPS_HGT) {
+            P[8][8] += sq(res.innov[0]);
+        } else {
+            for (uint8_t j = 0; j < res.m; j++) {
+                P[6 + j][6 + j] += sq(res.innov[j]);
+            }
+        }
+        break;
+    case CH_GPS_VEL:
+        for (uint8_t j = 0; j < res.m; j++) {
+            P[3 + j][3 + j] += sq(res.innov[j]);
+        }
+        break;
+    case CH_BARO:
+        // a baro offset that stayed (step or drift) is taken up by the bias
+        P[15][15] += sq(res.innov[0]);
+        break;
+    case CH_YAW:
+        P[2][2] += sq(res.innov[0]);
+        break;
+    case CH_AIRSPEED:
+        P[16][16] += sq(res.innov[0]);
+        P[17][17] += sq(res.innov[0]);
+        break;
+    }
+}
+
+void NavUKF_core::health_tick(uint32_t now_ms)
+{
+    if (!frontend.fd_enabled()) {
+        return;
+    }
+    const auto &gps = AP::dal().gps();
+    const uint8_t gi = gps.primary_sensor();
+    float h_acc = 0;
+    const bool gps_quality = gps.num_sats(gi) >= 7 && (!gps.horizontal_accuracy(gi, h_acc) || h_acc <= 5.0f);
+    const auto *arsp = AP::dal().airspeed();
+    const bool arsp_due = frontend.source_enabled(SRC_AIRSPEED) && arsp != nullptr && arsp->use() &&
+                          norm(x[4], x[5]) >= ftype(ARSP_MIN_GSPD);
+    const bool expected[NUM_CH] = {
+        frontend.source_enabled(SRC_GPS_HPOS) || frontend.source_enabled(SRC_GPS_HGT),
+        frontend.source_enabled(SRC_GPS_VEL),
+        frontend.source_enabled(SRC_BARO),
+        frontend.source_enabled(SRC_COMPASS) && (frontend.compass_allowed(0) || frontend.compass_allowed(1)),
+        arsp_due,
+    };
+    // baro drift: the bias state takes up a drift, so the innovations stay small; the bias rate shows it
+    const ftype dt = (health_tick_ms != 0 && now_ms > health_tick_ms) ? ftype(now_ms - health_tick_ms) * ftype(0.001) : ftype(0);
+    if (dt > 0) {
+        baro_bias_rate += ((x[16] - baro_bias_prev) / dt - baro_bias_rate) * MIN(dt / ftype(BARO_DRIFT_TAU), ftype(1));
+    }
+    baro_bias_prev = x[16];
+    health_tick_ms = now_ms;
+    const bool baro_ok = fabsF(baro_bias_rate) < ftype(BARO_DRIFT_RATE);
+    const bool quality[NUM_CH] = { gps_quality, gps_quality, baro_ok, true, true };
+    for (uint8_t ch = 0; ch < NUM_CH; ch++) {
+        health[ch].on_tick(now_ms, quality[ch], health_config(ch), expected[ch],
+                           ch == CH_BARO ? UKFHealth::Reason::DRIFT : UKFHealth::Reason::QUALITY);
+        UKFHealth::State old_state;
+        if (health[ch].take_change(old_state)) {
+            Log_Write_Health_Event(ch, old_state);
+            if (is_primary) {
+                static const char *st[] = { "OK", "WARNING", "FAULT", "ISOLATED", "RECOVERING" };
+                static const char *rs[] = { "-", "gate", "CUSUM", "timeout", "quality", "vote", "consistent", "reset", "drift" };
+                const UKFHealth::State s = health[ch].state();
+                const MAV_SEVERITY sev = (s == UKFHealth::State::FAULT || s == UKFHealth::State::ISOLATED) ? MAV_SEVERITY_CRITICAL :
+                                         (s == UKFHealth::State::WARNING) ? MAV_SEVERITY_WARNING : MAV_SEVERITY_INFO;
+                GCS_SEND_TEXT(sev, "UKF: %s %s (%s)", channel_name(ch), st[uint8_t(s)], rs[uint8_t(health[ch].reason())]);
+            }
+        }
+    }
+}
+
+void NavUKF_core::update(bool imu_usable, bool primary)
+{
+    is_primary = primary;
     Vector3F dAng, dVel;
     ftype dtA, dtV;
     if (!imu_usable || !read_imu(dAng, dtA, dVel, dtV)) {
@@ -745,6 +915,7 @@ void NavUKF_core::update(bool imu_usable)
            UKFBuffer::imu_reached_horizon(imu_buf.oldest().time_us, now_us, _horizon_delay_ms * 1000U, half_dt_us)) {
         advance_horizon();
     }
+    health_tick(AP::dal().millis());
     Log_Write();
     module_log_div = (module_log_div + 1) % 5;
 }
@@ -754,6 +925,7 @@ void NavUKF_core::update(bool imu_usable)
 #define UKF1_DEF "UKF1", "TimeUS,C,Roll,Pitch,Yaw,VN,VE,VD,PN,PE,PD", "s#ddhnnnmmm", "F-000000000", "QBfffffffff"
 #define UKF2_DEF "UKF2", "TimeUS,C,GX,GY,GZ,AX,AY,AZ,BB,WN,WE", "s#EEEooomnn", "F-000000000", "QBfffffffff"
 #define UKF3_DEF "UKF3", "TimeUS,C,SR,SP,SY,SVN,SVE,SVD,SPN,SPE,SPD,Reg,Fail", "s#dddnnnmmm--", "F-00000000000", "QBfffffffffBI"
+#define UKFE_DEF "UKFE", "TimeUS,C,Ch,Old,New,Rsn,Stat", "s#-----", "F-00000", "QBBBBBf"
 #define UKFD_DEF "UKFD", "TimeUS,C,Roll,Pitch,Yaw,VN,VE,VD,PN,PE,PD,Dly,Drop,Late", "s#ddhnnnmmm---", "F-000000000000", "QBfffffffffHII"
 #define UKFH_DEF "UKFH", "TimeUS,C,ABF,AH,BSt,BCH,BCL", "s#-o---", "F-00000", "QBBfHff"
 #define UKFP_DEF "UKFP", "TimeUS,C,Roll,Pitch,Yaw,VN,VE,VD,PN,PE,PD", "s#ddhnnnmmm", "F-000000000", "QBfffffffff"
@@ -797,6 +969,19 @@ void NavUKF_core::Log_Write_Innov(uint8_t type, const UpdateResult &res, bool in
                        float(res.nis), uint8_t(inside));
 #else
     (void)type; (void)res; (void)inside;
+#endif
+}
+
+void NavUKF_core::Log_Write_Health_Event(uint8_t ch, UKFHealth::State old_state) const
+{
+#if HAL_LOGGING_ENABLED
+    emit_fmt_in_replay(UKFE_DEF);
+    // @LoggerMessage: UKFE
+    // @Description: UKF fault detection event: channel Ch (0 GPS pos, 1 GPS vel, 2 baro, 3 compass yaw, 4 airspeed; 5-7 IMU 0-2 and 8-9 compass 1-2 from the votes, C = core 0) changed from Old to New (0 OK, 1 WARNING, 2 FAULT, 3 ISOLATED, 4 RECOVERING); Rsn test (1 gate, 2 CUSUM, 3 timeout, 4 quality, 5 vote, 6 consistent, 7 reset, 8 baro drift); Stat CUSUM statistic
+    AP::logger().Write(UKFE_DEF, AP::dal().micros64(), DAL_CORE(imu_index), ch, uint8_t(old_state),
+                       uint8_t(health[ch].state()), uint8_t(health[ch].reason()), float(health[ch].statistic()));
+#else
+    (void)ch; (void)old_state;
 #endif
 }
 

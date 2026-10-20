@@ -17,7 +17,7 @@ check UKF shadow estimator output in Replay logs (copy of check_replay.py with t
   with a log written before UKFD existed)
 '''
 
-UKF_LIST = ['UKF1', 'UKF2', 'UKF3', 'UKFN', 'UKFD', 'UKFH', 'UKFM', 'UKFP', 'UKFS']
+UKF_LIST = ['UKF1', 'UKF2', 'UKF3', 'UKFN', 'UKFD', 'UKFH', 'UKFM', 'UKFP', 'UKFS', 'UKFE']
 
 
 def msg_key(m):
@@ -26,6 +26,8 @@ def msg_key(m):
         return (m.C, m.T)
     if m.get_type() == 'UKFM':
         return (m.C, m.M)
+    if m.get_type() == 'UKFE':
+        return (m.C, m.Ch, m.TimeUS)
     return m.C
 
 

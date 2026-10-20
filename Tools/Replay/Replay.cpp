@@ -321,6 +321,14 @@ void Replay::loop()
                unsigned(_vehicle.ukf.primary_core()), unsigned(_vehicle.ukf.primary_switches()),
                unsigned(_vehicle.ukf.imu_voted_out_ever()), unsigned(_vehicle.ukf.compass_isolations()),
                unsigned(_vehicle.ukf.yaw_suspensions()));
+        // fault detection (Step 20): per channel of the final primary core
+        const NavUKF_core &pc = _vehicle.ukf.core(_vehicle.ukf.primary_core());
+        printf("UKF faults (core %u):", unsigned(_vehicle.ukf.primary_core()));
+        for (uint8_t ch = 0; ch < NavUKF_core::NUM_CH; ch++) {
+            const UKFHealth::Channel &h = pc.channel(ch);
+            printf(" %s %u faults %u warnings %.1f s isolated%s", NavUKF_core::channel_name(ch), unsigned(h.faults()),
+                   unsigned(h.warnings()), 0.001 * h.isolated_ms(), ch + 1 < NavUKF_core::NUM_CH ? "," : "\n");
+        }
 #if CONFIG_HAL_BOARD == HAL_BOARD_LINUX
     // If we don't tear down the threads then they continue to access
     // global state during object destruction.

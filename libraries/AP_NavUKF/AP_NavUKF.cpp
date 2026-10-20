@@ -253,6 +253,64 @@ const AP_Param::GroupInfo NavUKF::var_info[] = {
     // @User: Advanced
     AP_GROUPINFO("MAG_TOL", 29, NavUKF, _mag_tol, 10.0f),
 
+    // @Param: FD_ENABLE
+    // @DisplayName: Fault detection
+    // @Description: Innovation gate, persistence, CUSUM and timeouts per sensor channel; faulty channels are isolated (not fused) and re-admitted after a consistent period (ukf_state_model.md Section 17)
+    // @Values: 0:Disabled,1:Enabled
+    // @User: Advanced
+    AP_GROUPINFO("FD_ENABLE", 30, NavUKF, _fd_enable, 1),
+
+    // @Param: FD_GATE
+    // @DisplayName: Fault detection gate scale
+    // @Description: Scale on the per-channel innovation gates (in standard deviations; 1 = gates set on the fault-free logs)
+    // @Range: 0.5 5
+    // @User: Advanced
+    AP_GROUPINFO("FD_GATE", 31, NavUKF, _fd_gate, 1.0f),
+
+    // @Param: FD_K
+    // @DisplayName: Fault detection persistence count
+    // @Description: A channel is faulty when FD_K of the last FD_N samples were outside the gate
+    // @Range: 1 16
+    // @User: Advanced
+    AP_GROUPINFO("FD_K", 32, NavUKF, _fd_k, 5),
+
+    // @Param: FD_N
+    // @DisplayName: Fault detection persistence window
+    // @Description: Number of recent samples in the persistence test
+    // @Range: 1 16
+    // @User: Advanced
+    AP_GROUPINFO("FD_N", 33, NavUKF, _fd_n, 10),
+
+    // @Param: FD_CUSUM
+    // @DisplayName: Fault detection CUSUM scale
+    // @Description: Scale on the per-channel CUSUM thresholds (1 = thresholds set on the fault-free logs)
+    // @Range: 0.2 10
+    // @User: Advanced
+    AP_GROUPINFO("FD_CUSUM", 34, NavUKF, _fd_cusum, 1.0f),
+
+    // @Param: FD_RECOV
+    // @DisplayName: Fault recovery period
+    // @Description: Consistent innovations (computed but not fused) for this long re-admit an isolated channel; as long again in RECOVERING returns it to OK
+    // @Units: s
+    // @Range: 1 60
+    // @User: Advanced
+    AP_GROUPINFO("FD_RECOV", 35, NavUKF, _fd_recov, 5.0f),
+
+    // @Param: FD_RESET
+    // @DisplayName: Fault reset period
+    // @Description: A channel isolated this long while its data keep arriving is re-admitted with a covariance reset (the state may have drifted while it was excluded)
+    // @Units: s
+    // @Range: 5 300
+    // @User: Advanced
+    AP_GROUPINFO("FD_RESET", 36, NavUKF, _fd_reset, 15.0f),
+
+    // @Param: WIND_PSCALE
+    // @DisplayName: Wind process noise height-rate scale
+    // @Description: The wind process noise is scaled by (1 + WIND_PSCALE * |vertical speed|), as EKF3 does (EK3_WIND_PSCALE): wind changes with height (wind gradient), so the wind states must be free to change in climbs and descents
+    // @Range: 0 1
+    // @User: Advanced
+    AP_GROUPINFO("WIND_PSCALE", 37, NavUKF, _wind_pscale, 1.0f),
+
     AP_GROUPEND
 };
 
@@ -509,9 +567,10 @@ void NavUKF::UpdateFilter(void)
             }
             core_needs_reset &= ~(1U << c);
         }
-        cores[c].update(imu_usable[c]);
+        cores[c].update(imu_usable[c], c == primary);
     }
     select_primary(now_ms);
+    Log_Write_Vote_Events();
 
     if (cores[primary].initialised()) {
         cores[primary].Log_Write_Primary();
@@ -524,10 +583,35 @@ void NavUKF::UpdateFilter(void)
     _frame_count++;
 }
 
+void NavUKF::Log_Write_Vote_Events(void)
+{
+#if HAL_LOGGING_ENABLED
+#define UKFE_VOTE_DEF "UKFE", "TimeUS,C,Ch,Old,New,Rsn,Stat", "s#-----", "F-00000", "QBBBBBf"
+    for (uint8_t i = 0; i < 5; i++) {
+        const bool now_out = (i < 3) ? (imu_out & (1U << i)) : (compass_isolated & (1U << (i - 3)));
+        const bool was_out = (i < 3) ? (imu_out_logged & (1U << i)) : (compass_logged & (1U << (i - 3)));
+        if (now_out == was_out) {
+            continue;
+        }
+#if APM_BUILD_TYPE(APM_BUILD_Replay)
+        AP_Logger::log_write_fmt *f = AP::logger().msg_fmt_for_name(UKFE_VOTE_DEF, true);
+        if (f != nullptr) {
+            AP::logger().Safe_Write_Emit_FMT(f);
+        }
+#endif
+        // the vote channels change between OK (0) and ISOLATED (3), test "vote" (5)
+        AP::logger().Write(UKFE_VOTE_DEF, AP::dal().micros64(), DAL_CORE(0), uint8_t(5 + i),
+                           uint8_t(was_out ? 3 : 0), uint8_t(now_out ? 3 : 0), uint8_t(5), 0.0f);
+    }
+#endif
+    imu_out_logged = imu_out;
+    compass_logged = compass_isolated;
+}
+
 void NavUKF::Log_Write_Status(void) const
 {
 #if HAL_LOGGING_ENABLED
-#define UKFS_DEF "UKFS", "TimeUS,C,Pri,Sc0,Sc1,Sc2,IU,IV,MI,NSw", "s#--------", "F-00000000", "QBBfffBBBH"
+#define UKFS_DEF "UKFS", "TimeUS,C,Pri,Sc0,Sc1,Sc2,IU,IV,MI,NSw,H0,H1,H2", "s#-----------", "F-00000000000", "QBBfffBBBHBBB"
 #if APM_BUILD_TYPE(APM_BUILD_Replay)
     AP_Logger::log_write_fmt *f = AP::logger().msg_fmt_for_name(UKFS_DEF, true);
     if (f != nullptr) {
@@ -539,11 +623,12 @@ void NavUKF::Log_Write_Status(void) const
         usable |= imu_usable[i] ? (1U << i) : 0;
     }
     // @LoggerMessage: UKFS
-    // @Description: UKF redundancy at 10 Hz: Pri primary core, Sc0-Sc2 core scores (NIS per degree of freedom, filtered), IU IMUs delivering data, IV IMUs voted out, MI compass vote (0 both used, 1 compass 1 isolated, 2 compass 2 isolated, 3 yaw fusion suspended), NSw primary switches
+    // @Description: UKF redundancy at 10 Hz: Pri primary core, Sc0-Sc2 core scores (NIS per degree of freedom, filtered), IU IMUs delivering data, IV IMUs voted out, MI compass vote (0 both used, 1 compass 1 isolated, 2 compass 2 isolated, 3 yaw fusion suspended), NSw primary switches, H0-H2 health of cores 0-2 (bit ch: channel ch not OK: 0 GPS pos, 1 GPS vel, 2 baro, 3 compass yaw, 4 airspeed)
     AP::logger().Write(UKFS_DEF,
                        AP::dal().micros64(), DAL_CORE(0), primary,
                        float(cores[0].score()), float(cores[1].score()), float(cores[2].score()),
-                       usable, imu_out, compass_isolated, switch_count);
+                       usable, imu_out, compass_isolated, switch_count,
+                       cores[0].health_mask(), cores[1].health_mask(), cores[2].health_mask());
 #endif
 }
 

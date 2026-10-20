@@ -9,6 +9,7 @@
 #include "AP_NavUKF_math.h"
 #include "AP_NavUKF_model.h"
 #include "AP_NavUKF_buffer.h"
+#include "AP_NavUKF_health.h"
 
 class NavUKF;
 
@@ -23,8 +24,16 @@ public:
 
     CLASS_NO_COPY(NavUKF_core);
 
-    // one filter step, called once per DAL frame; imu_usable false: this core's IMU is out, skip the step
-    void update(bool imu_usable);
+    // one filter step, called once per DAL frame; imu_usable false: this core's IMU is out, skip the step;
+    // primary: this core gives the output (its channel state changes are announced to the GCS)
+    void update(bool imu_usable, bool primary);
+
+    // fault detection (Step 20): sensor channels monitored by each core
+    enum HealthChannel : uint8_t { CH_GPS_POS = 0, CH_GPS_VEL = 1, CH_BARO = 2, CH_YAW = 3, CH_AIRSPEED = 4, NUM_CH = 5 };
+    static const char *channel_name(uint8_t ch);
+    const UKFHealth::Channel &channel(uint8_t ch) const { return health[ch]; }
+    // bit ch set: channel ch not OK
+    uint8_t health_mask(void) const;
 
     bool initialised(void) const { return _initialised; }
     uint8_t imu(void) const { return imu_index; }
@@ -61,6 +70,18 @@ private:
     const NavUKF &frontend;
     const uint8_t imu_index;
     ftype nis_score;
+    bool is_primary;
+
+    // fault detection (Step 20, ukf_state_model.md Section 17)
+    UKFHealth::Channel health[NUM_CH];
+    ftype baro_bias_prev;                   // baro bias at the previous health tick, m
+    ftype baro_bias_rate;                   // its rate, low-pass filtered, m/s
+    uint32_t health_tick_ms;
+    UKFHealth::Config health_config(uint8_t ch) const;
+    void health_tick(uint32_t now_ms);
+    // inflate the covariance of the states channel ch observes by the squared innovations (re-admission with a reset)
+    void inflate_for_channel(uint8_t ch, const UKFMath::UpdateResult &res, UKFModel::Meas t);
+    void Log_Write_Health_Event(uint8_t ch, UKFHealth::State old_state) const;
 
     // nominal state (ukf_state_model.md Section 2) and error-state covariance
     ftype x[UKFMath::NUM_STATES];
@@ -199,8 +220,10 @@ private:
     void reset_output(void);
 
     // one unscented update of measurement t with fresh sigma points; logs UKFN
+    // fuse one measurement; ch >= 0: through the health channel ch (gate, persistence, CUSUM, isolation);
+    // returns true if it was fused
     bool fuse(UKFModel::Meas t, uint8_t m, const ftype z[UKFMath::MAX_MEAS], const ftype sd[UKFMath::MAX_MEAS],
-              UKFMath::UpdateResult *result = nullptr);
+              UKFMath::UpdateResult *result = nullptr, int8_t ch = -1);
 
     // CUSUM on a baro innovation; on a detected step the baro bias variance is inflated
     void baro_step_check(const UKFMath::UpdateResult &res);

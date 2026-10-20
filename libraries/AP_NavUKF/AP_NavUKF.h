@@ -40,6 +40,17 @@ public:
     uint8_t imu_voted_out_ever() const { return imu_out_ever; }
     uint16_t compass_isolations() const { return compass_isolation_count; }
     uint16_t yaw_suspensions() const { return yaw_suspension_count; }
+    // fault detection (Step 20)
+    bool fd_enabled() const { return _fd_enable != 0; }
+    ftype fd_gate_scale() const { return MAX(_fd_gate.get(), 0.1f); }
+    ftype fd_cusum_scale() const { return MAX(_fd_cusum.get(), 0.1f); }
+    uint8_t fd_k() const { return uint8_t(constrain_int16(_fd_k.get(), 1, 16)); }
+    uint8_t fd_n() const { return uint8_t(constrain_int16(_fd_n.get(), 1, 16)); }
+    uint32_t fd_recov_ms() const { return uint32_t(MAX(_fd_recov.get(), 0.0f) * 1000.0f); }
+    uint32_t fd_reset_ms() const { return uint32_t(MAX(_fd_reset.get(), 0.0f) * 1000.0f); }
+    const NavUKF_core &core(uint8_t c) const { return cores[c]; }
+    ftype wind_pscale() const { return constrain_float(_wind_pscale.get(), 0.0f, 1.0f); }
+
     // compass i may be fused (compass voting has not isolated it)
     bool compass_allowed(uint8_t i) const { return i >= 8 || !(compass_isolated & (1U << i)); }
 
@@ -99,6 +110,14 @@ private:
     AP_Float _imu_gtol;         // gyro voting tolerance, rad/s
     AP_Float _imu_atol;         // accel voting tolerance, m/s^2
     AP_Float _mag_tol;          // compass voting tolerance, deg
+    AP_Int8 _fd_enable;         // fault detection on
+    AP_Float _fd_gate;          // gate scale (1 = per-channel defaults)
+    AP_Int8 _fd_k;              // persistence: k gated samples ...
+    AP_Int8 _fd_n;              // ... in the last n
+    AP_Float _fd_cusum;         // CUSUM threshold scale
+    AP_Float _fd_recov;         // consistent period for recovery, s
+    AP_Float _fd_reset;         // isolation after which a channel is re-admitted with a reset, s
+    AP_Float _wind_pscale;      // wind process noise scale per m/s of vertical speed
 
     NavUKF_core cores[MAX_CORES] { {*this, 0}, {*this, 1}, {*this, 2} };
 
@@ -133,6 +152,10 @@ private:
     uint8_t better_core;
     uint8_t log_div;
     void Log_Write_Status(void) const;
+    // vote changes as fault-detection events (UKFE channels 5-9)
+    uint8_t imu_out_logged;
+    uint8_t compass_logged;
+    void Log_Write_Vote_Events(void);
 };
 
 #endif // HAL_NAVUKF_AVAILABLE

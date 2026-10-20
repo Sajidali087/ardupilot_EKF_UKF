@@ -101,6 +101,31 @@ uint8_t abias_frozen_axes(const QuaternionF &q, bool manoeuvring)
     return frozen;
 }
 
+ftype median3(ftype a, ftype b, ftype c)
+{
+    return MAX(MIN(a, b), MIN(MAX(a, b), c));
+}
+
+bool primary_decision(uint8_t primary, const bool healthy[3], const ftype score[3], ftype ratio,
+                      int8_t &best, bool &candidate)
+{
+    best = -1;
+    for (uint8_t c = 0; c < 3; c++) {
+        if (healthy[c] && (best < 0 || score[c] < score[best])) {
+            best = int8_t(c);
+        }
+    }
+    candidate = false;
+    if (best < 0) {
+        return false;
+    }
+    if (primary > 2 || !healthy[primary]) {
+        return uint8_t(best) != primary;
+    }
+    candidate = uint8_t(best) != primary && score[best] < ratio * score[primary];
+    return false;
+}
+
 bool nis_inside_bounds(ftype nis, uint8_t m)
 {
     // two-sided 95 % bounds of chi-square with m degrees of freedom (2.5 % and 97.5 % points)

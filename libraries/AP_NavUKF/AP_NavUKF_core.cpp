@@ -42,7 +42,8 @@ static constexpr float MAN_RATE = 0.1f;             // rad/s, rotation rate that
 static constexpr float BARO_CUSUM_K = 1.0f;         // allowance, innovation standard deviations
 static constexpr float BARO_CUSUM_H = 50.0f;        // decision threshold
 
-static constexpr uint16_t HORIZON_MARGIN_MS = 60;   // a sample reaches the DAL up to 57 ms after its stamp (GPS; baro and compass 21 ms; S1)
+static constexpr uint16_t HORIZON_MARGIN_MS = 60;
+static constexpr float SCORE_ALPHA = 0.005f;        // low-pass factor of the core selection score per update   // a sample reaches the DAL up to 57 ms after its stamp (GPS; baro and compass 21 ms; S1)
 static constexpr float OUTPUT_TAU = 0.25f;          // s, output velocity and position tracking time constant (EKF3 EK3_TAU_OUTPUT default)
 
 bool NavUKF_core::read_imu(Vector3F &dAng, ftype &dtA, Vector3F &dVel, ftype &dtV) const
@@ -53,7 +54,12 @@ bool NavUKF_core::read_imu(Vector3F &dAng, ftype &dtA, Vector3F &dVel, ftype &dt
     }
     Vector3f dAngF, dVelF;
     float dtAF, dtVF;
-    if (!ins.get_delta_angle(0, dAngF, dtAF) || !ins.get_delta_velocity(0, dVelF, dtVF)) {
+    // the IMU must be in use (a failed IMU keeps its last deltas in the DAL with the use flags cleared)
+    if (imu_index >= ins.get_gyro_count() || imu_index >= ins.get_accel_count() ||
+        !ins.use_gyro(imu_index) || !ins.use_accel(imu_index)) {
+        return false;
+    }
+    if (!ins.get_delta_angle(imu_index, dAngF, dtAF) || !ins.get_delta_velocity(imu_index, dVelF, dtVF)) {
         return false;
     }
     if (dtAF < 1.0e-4f || dtVF < 1.0e-4f) {
@@ -186,6 +192,7 @@ void NavUKF_core::try_initialise(const Vector3F &dAng, ftype dtA, const Vector3F
     late_count = 0;
     memset(last_src_fuse_us, 0, sizeof(last_src_fuse_us));
     module_log_div = 0;
+    nis_score = 1;
     man_accel = 0;
     man_rate = 0;
     baro_cusum_hi = 0;
@@ -316,7 +323,8 @@ bool NavUKF_core::read_mag(Vector3F &mag, uint32_t &update_us) const
     update_us = 0;
     uint8_t nmag = 0;
     for (uint8_t i = 0; i < compass.get_count(); i++) {
-        if (compass.use_for_yaw(i) && compass.healthy(i)) {
+        // compass voting (Step 19) may isolate a compass
+        if (compass.use_for_yaw(i) && compass.healthy(i) && frontend.compass_allowed(i)) {
             mag += compass.get_field(i).toftype();
             update_us = MAX(update_us, compass.last_update_usec(i));
             nmag++;
@@ -352,6 +360,8 @@ bool NavUKF_core::fuse(UKFModel::Meas t, uint8_t m, const ftype z[MAX_MEAS], con
         return false;
     }
     const bool inside = UKFModel::nis_inside_bounds(res.nis, m);
+    // core selection score: NIS per degree of freedom, time constant about 5 s at 40 updates per second
+    nis_score += (MIN(res.nis / ftype(m), ftype(100)) - nis_score) * ftype(SCORE_ALPHA);
     if (AP::dal().micros64() - init_time_us >= NIS_SETTLE_US) {
         _nis_count[uint8_t(t)]++;
         if (inside) {
@@ -633,11 +643,74 @@ NavUKF_core::ModuleStatus NavUKF_core::module_status(Module mod, uint8_t &src_in
     return (src_in_use == switched_on) ? MS_AIDED : MS_DEGRADED;
 }
 
-void NavUKF_core::update(void)
+void NavUKF_core::output_euler(ftype &roll, ftype &pitch, ftype &yaw) const
+{
+    const QuaternionF qo(xout[0], xout[1], xout[2], xout[3]);
+    roll = qo.get_euler_roll();
+    pitch = qo.get_euler_pitch();
+    yaw = qo.get_euler_yaw();
+}
+
+void NavUKF_core::reset_from(const NavUKF_core &src)
+{
+    memcpy(x, src.x, sizeof(x));
+    memcpy(P, src.P, sizeof(P));
+    weights = src.weights;
+    last_gps_ms = src.last_gps_ms;
+    last_baro_ms = src.last_baro_ms;
+    last_mag_us = src.last_mag_us;
+    last_arsp_ms = src.last_arsp_ms;
+    baro_ref = src.baro_ref;
+    have_baro_ref = src.have_baro_ref;
+    origin = src.origin;
+    init_time_us = src.init_time_us;
+    imu_buf = src.imu_buf;
+    gps_buf = src.gps_buf;
+    baro_buf = src.baro_buf;
+    mag_buf = src.mag_buf;
+    air_buf = src.air_buf;
+    gps_delay_us = src.gps_delay_us;
+    baro_delay_us = src.baro_delay_us;
+    mag_delay_us = src.mag_delay_us;
+    arsp_delay_us = src.arsp_delay_us;
+    _horizon_delay_ms = src._horizon_delay_ms;
+    horizon_us = src.horizon_us;
+    man_accel = src.man_accel;
+    man_rate = src.man_rate;
+    abias_frozen = src.abias_frozen;
+    baro_cusum_hi = src.baro_cusum_hi;
+    baro_cusum_lo = src.baro_cusum_lo;
+    memcpy(last_src_fuse_us, src.last_src_fuse_us, sizeof(last_src_fuse_us));
+    memcpy(xout, src.xout, sizeof(xout));
+    out_dang_corr = src.out_dang_corr;
+    out_vel_int = src.out_vel_int;
+    out_pos_int = src.out_pos_int;
+    nis_score = src.nis_score;
+    // this IMU's own biases are unknown: zero, with the initial uncertainty and no correlations
+    for (uint8_t i = 10; i < 16; i++) {
+        x[i] = 0;
+    }
+    for (uint8_t r = 9; r < 15; r++) {
+        for (uint8_t c = 0; c < NUM_ERR; c++) {
+            P[r][c] = 0;
+            P[c][r] = 0;
+        }
+    }
+    for (uint8_t i = 0; i < 3; i++) {
+        P[9 + i][9 + i] = sq(ftype(INIT_SIG_GYRO_BIAS));
+    }
+    P[12][12] = sq(ftype(INIT_SIG_ACCEL_BIAS_XY));
+    P[13][13] = sq(ftype(INIT_SIG_ACCEL_BIAS_XY));
+    P[14][14] = sq(ftype(INIT_SIG_ACCEL_BIAS_Z));
+    reset_alignment();
+    _initialised = src._initialised;
+}
+
+void NavUKF_core::update(bool imu_usable)
 {
     Vector3F dAng, dVel;
     ftype dtA, dtV;
-    if (!read_imu(dAng, dtA, dVel, dtV)) {
+    if (!imu_usable || !read_imu(dAng, dtA, dVel, dtV)) {
         return;
     }
     if (!_initialised) {
@@ -683,6 +756,7 @@ void NavUKF_core::update(void)
 #define UKF3_DEF "UKF3", "TimeUS,C,SR,SP,SY,SVN,SVE,SVD,SPN,SPE,SPD,Reg,Fail", "s#dddnnnmmm--", "F-00000000000", "QBfffffffffBI"
 #define UKFD_DEF "UKFD", "TimeUS,C,Roll,Pitch,Yaw,VN,VE,VD,PN,PE,PD,Dly,Drop,Late", "s#ddhnnnmmm---", "F-000000000000", "QBfffffffffHII"
 #define UKFH_DEF "UKFH", "TimeUS,C,ABF,AH,BSt,BCH,BCL", "s#-o---", "F-00000", "QBBfHff"
+#define UKFP_DEF "UKFP", "TimeUS,C,Roll,Pitch,Yaw,VN,VE,VD,PN,PE,PD", "s#ddhnnnmmm", "F-000000000", "QBfffffffff"
 #define UKFM_DEF "UKFM", "TimeUS,C,M,V1,V2,V3,S1,S2,S3,Src,St", "s#---------", "F-000000000", "QBBffffffBB"
 #define UKFN_DEF "UKFN", "TimeUS,C,T,I0,I1,I2,S0,S1,S2,NIS,In", "s#---------", "F-000000000", "QBBfffffffB"
 
@@ -717,12 +791,29 @@ void NavUKF_core::Log_Write_Innov(uint8_t type, const UpdateResult &res, bool in
         sd[j] = res.innov_sd[j];
     }
     AP::logger().Write(UKFN_DEF,
-                       AP::dal().micros64(), DAL_CORE(0), type,
+                       AP::dal().micros64(), DAL_CORE(imu_index), type,
                        float(in[0]), float(in[1]), float(in[2]),
                        float(sd[0]), float(sd[1]), float(sd[2]),
                        float(res.nis), uint8_t(inside));
 #else
     (void)type; (void)res; (void)inside;
+#endif
+}
+
+void NavUKF_core::Log_Write_Primary(void) const
+{
+#if HAL_LOGGING_ENABLED
+    emit_fmt_in_replay(UKFP_DEF);
+    const QuaternionF qo(xout[0], xout[1], xout[2], xout[3]);
+    // @LoggerMessage: UKFP
+    // @Description: UKF shadow estimator output of the primary core (C: its core number), the estimator's result with three cores; same fields as UKF1
+    AP::logger().Write(UKFP_DEF,
+                       AP::dal().micros64(), DAL_CORE(imu_index),
+                       float(degrees(qo.get_euler_roll())),
+                       float(degrees(qo.get_euler_pitch())),
+                       float(wrap_360(degrees(qo.get_euler_yaw()))),
+                       float(xout[4]), float(xout[5]), float(xout[6]),
+                       float(xout[7]), float(xout[8]), float(xout[9]));
 #endif
 }
 
@@ -736,7 +827,7 @@ void NavUKF_core::Log_Write(void) const
     emit_fmt_in_replay(UKFH_DEF);
 
     const uint64_t time_us = AP::dal().micros64();
-    const uint8_t core = DAL_CORE(0);
+    const uint8_t core = DAL_CORE(imu_index);
     const QuaternionF qo(xout[0], xout[1], xout[2], xout[3]);
     const QuaternionF q(x[0], x[1], x[2], x[3]);
 

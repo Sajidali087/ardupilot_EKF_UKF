@@ -66,6 +66,17 @@ void add_process_noise(ftype P[NUM_ERR][NUM_ERR], const ProcessNoise &q, ftype d
  */
 uint8_t abias_frozen_axes(const QuaternionF &q, bool manoeuvring);
 
+// median of three values (IMU voting, Part 2 Step 19.2)
+ftype median3(ftype a, ftype b, ftype c);
+
+/*
+  core selection decision (Step 19.3), without timing: the healthy core with the lowest score is `best` (-1 if none);
+  returns true if the primary must change at once (it is not healthy); `candidate` is true if another healthy core's
+  score is below ratio times the primary's (a switch after it has held for the hold time)
+ */
+bool primary_decision(uint8_t primary, const bool healthy[3], const ftype score[3], ftype ratio,
+                      int8_t &best, bool &candidate);
+
 // measurement models h(x) (ukf_state_model.md Section 5), sequential updates
 enum class Meas : uint8_t {
     GPS_POS = 0,    // p, 3 (2 if no vertical)

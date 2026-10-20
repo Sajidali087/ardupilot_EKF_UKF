@@ -238,6 +238,43 @@ TEST(UKFModel, GpsHeightOnly)
     EXPECT_NEAR(z[0], ftype(-95), TOL);
 }
 
+TEST(UKFModel, MedianVote)
+{
+    // the median ignores one outlier whichever IMU it is
+    EXPECT_NEAR(median3(ftype(0.01), ftype(0.012), ftype(0.04)), ftype(0.012), TOL);
+    EXPECT_NEAR(median3(ftype(0.04), ftype(0.01), ftype(0.012)), ftype(0.012), TOL);
+    EXPECT_NEAR(median3(ftype(0.012), ftype(0.04), ftype(0.01)), ftype(0.012), TOL);
+    EXPECT_NEAR(median3(-1, 5, 2), 2, TOL);
+    EXPECT_NEAR(median3(3, 3, -7), 3, TOL);
+}
+
+TEST(UKFModel, PrimarySelection)
+{
+    int8_t best;
+    bool candidate;
+    const ftype ratio = ftype(0.5);
+    // all healthy, similar scores: stay
+    bool h[3] = { true, true, true };
+    ftype s[3] = { ftype(1.2), ftype(1.0), ftype(1.1) };
+    EXPECT_FALSE(primary_decision(0, h, s, ratio, best, candidate));
+    EXPECT_EQ(best, 1);
+    EXPECT_FALSE(candidate);
+    // another core clearly better: candidate (switch only after the hold time), not at once
+    s[1] = ftype(0.5);
+    s[0] = ftype(1.5);
+    EXPECT_FALSE(primary_decision(0, h, s, ratio, best, candidate));
+    EXPECT_TRUE(candidate);
+    // primary unhealthy (IMU voted out): switch at once to the best healthy core, even with a better score
+    h[0] = false;
+    s[0] = ftype(0.1);
+    EXPECT_TRUE(primary_decision(0, h, s, ratio, best, candidate));
+    EXPECT_EQ(best, 1);
+    // no healthy core: no decision
+    h[1] = h[2] = false;
+    EXPECT_FALSE(primary_decision(0, h, s, ratio, best, candidate));
+    EXPECT_EQ(best, -1);
+}
+
 TEST(UKFModel, NisBounds)
 {
     // two-sided 95 % chi-square bounds (ukf_state_model.md Section 8)

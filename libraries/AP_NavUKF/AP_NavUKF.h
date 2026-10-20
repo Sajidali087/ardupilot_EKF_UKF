@@ -24,12 +24,24 @@ public:
     // number of UpdateFilter calls that ran (stub check for Replay)
     uint32_t frame_count() const { return _frame_count; }
 
-    // true once the core has aligned and initialised
-    bool initialised() const { return core.initialised(); }
+    // true once the primary core has aligned and initialised
+    bool initialised() const { return cores[primary].initialised(); }
 
-    // NIS monitoring after the settling time, per measurement type (0 GPS pos, 1 GPS vel, 2 baro, 3 yaw, 4 airspeed, 5 sideslip)
-    uint32_t nis_count(uint8_t t) const { return core.nis_count(t); }
-    uint32_t nis_inside(uint8_t t) const { return core.nis_inside(t); }
+    // NIS monitoring after the settling time of core c, per measurement type (0 GPS pos, 1 GPS vel, 2 baro, 3 yaw, 4 airspeed, 5 sideslip, 6 GPS hgt)
+    uint32_t nis_count(uint8_t t, uint8_t c = 0) const { return cores[c].nis_count(t); }
+    uint32_t nis_inside(uint8_t t, uint8_t c = 0) const { return cores[c].nis_inside(t); }
+
+    // redundancy (Step 19): cores, primary core, IMU and compass votes
+    static constexpr uint8_t MAX_CORES = 3;
+    bool core_enabled(uint8_t c) const { return c < MAX_CORES && (uint8_t(_imu_mask.get()) & (1U << c)) != 0; }
+    bool core_initialised(uint8_t c) const { return c < MAX_CORES && cores[c].initialised(); }
+    uint8_t primary_core() const { return primary; }
+    uint16_t primary_switches() const { return switch_count; }
+    uint8_t imu_voted_out_ever() const { return imu_out_ever; }
+    uint16_t compass_isolations() const { return compass_isolation_count; }
+    uint16_t yaw_suspensions() const { return yaw_suspension_count; }
+    // compass i may be fused (compass voting has not isolated it)
+    bool compass_allowed(uint8_t i) const { return i >= 8 || !(compass_isolated & (1U << i)); }
 
     // tuning values for the core
     UKFModel::ProcessNoise process_noise() const;
@@ -54,7 +66,7 @@ public:
     ftype abias_man() const { return _abias_man.get(); }
 
     // fusion horizon delay in ms chosen at initialisation
-    uint16_t horizon_delay_ms() const { return core.horizon_delay_ms(); }
+    uint16_t horizon_delay_ms() const { return cores[primary].horizon_delay_ms(); }
 
 private:
     AP_Int8 _enable;
@@ -83,10 +95,44 @@ private:
     AP_Float _sslip_noise;      // lateral body airspeed noise, m/s
     AP_Float _arsp_scale;       // Pitot calibration factor on true airspeed
     AP_Int16 _mod_mask;         // aiding sources of the fusion modules
+    AP_Int8 _imu_mask;          // IMUs that run a UKF core
+    AP_Float _imu_gtol;         // gyro voting tolerance, rad/s
+    AP_Float _imu_atol;         // accel voting tolerance, m/s^2
+    AP_Float _mag_tol;          // compass voting tolerance, deg
 
-    NavUKF_core core{*this};
+    NavUKF_core cores[MAX_CORES] { {*this, 0}, {*this, 1}, {*this, 2} };
 
     uint32_t _frame_count;
+
+    // IMU voting on the raw data (Step 19.2)
+    void vote_imus(uint32_t now_ms);
+    bool imu_usable[MAX_CORES];         // delivering valid data this frame
+    Vector3F gyro_filt[MAX_CORES];      // low-pass filtered rate, rad/s
+    Vector3F accel_filt[MAX_CORES];     // low-pass filtered specific force, m/s^2
+    uint32_t imu_valid_since_ms[MAX_CORES];
+    uint32_t imu_bad_since_ms[MAX_CORES];
+    uint32_t imu_good_since_ms[MAX_CORES];
+    uint8_t imu_out;                    // bit i: IMU i voted out (bad data or no data)
+    uint8_t imu_out_ever;
+    uint8_t core_needs_reset;           // bit i: core i must restart from the primary when its IMU returns
+
+    // compass voting (Step 19.4)
+    void vote_compasses(uint32_t now_ms);
+    ftype mag_diff_filt[3];             // filtered |yaw difference|: compass 0-1, 0-prediction, 1-prediction, rad
+    uint32_t mag_cond_since_ms;         // time the current voting outcome has held
+    uint8_t mag_cond_pending;           // outcome being confirmed (isolated mask)
+    uint8_t compass_isolated;           // bit i: compass i not fused
+    uint16_t compass_isolation_count;
+    uint16_t yaw_suspension_count;
+
+    // core selection (Step 19.3)
+    void select_primary(uint32_t now_ms);
+    uint8_t primary;
+    uint16_t switch_count;
+    uint32_t better_since_ms;
+    uint8_t better_core;
+    uint8_t log_div;
+    void Log_Write_Status(void) const;
 };
 
 #endif // HAL_NAVUKF_AVAILABLE

@@ -312,6 +312,15 @@ void Replay::loop()
             const uint32_t n = _vehicle.ukf.nis_count(t);
             printf(" %s %.1f%% (%u)%s", nis_names[t], n ? 100.0 * _vehicle.ukf.nis_inside(t) / n : 0.0, unsigned(n), t < 6 ? "," : "\n");
         }
+        // redundancy (Step 19): cores, final primary, switches, votes
+        printf("UKF cores:");
+        for (uint8_t c = 0; c < NavUKF::MAX_CORES; c++) {
+            printf(" %u%s", unsigned(c), _vehicle.ukf.core_enabled(c) ? (_vehicle.ukf.core_initialised(c) ? "=init" : "=off") : "=disabled");
+        }
+        printf(", primary %u, switches %u, IMUs voted out (mask) %u, compass isolations %u, yaw suspensions %u\n",
+               unsigned(_vehicle.ukf.primary_core()), unsigned(_vehicle.ukf.primary_switches()),
+               unsigned(_vehicle.ukf.imu_voted_out_ever()), unsigned(_vehicle.ukf.compass_isolations()),
+               unsigned(_vehicle.ukf.yaw_suspensions()));
 #if CONFIG_HAL_BOARD == HAL_BOARD_LINUX
     // If we don't tear down the threads then they continue to access
     // global state during object destruction.

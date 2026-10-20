@@ -13,20 +13,34 @@
 class NavUKF;
 
 /*
-  one UKF core on IMU 0. All sensor data comes through the DAL.
+  one UKF core on one IMU (Step 19: up to three cores, one per IMU). All sensor data comes through the DAL.
   The filter runs on a delayed fusion horizon (now minus the largest sensor delay);
   an output predictor carries attitude, velocity and position to the current time.
  */
 class NavUKF_core {
 public:
-    NavUKF_core(const NavUKF &_frontend) : frontend(_frontend) {}
+    NavUKF_core(const NavUKF &_frontend, uint8_t _imu_index) : frontend(_frontend), imu_index(_imu_index) {}
 
     CLASS_NO_COPY(NavUKF_core);
 
-    // one filter step, called once per DAL frame
-    void update(void);
+    // one filter step, called once per DAL frame; imu_usable false: this core's IMU is out, skip the step
+    void update(bool imu_usable);
 
     bool initialised(void) const { return _initialised; }
+    uint8_t imu(void) const { return imu_index; }
+
+    // health score for core selection: innovation NIS / dimension, low-pass filtered over all updates (about 1 when consistent)
+    ftype score(void) const { return nis_score; }
+
+    // attitude of the output at the current time (rad)
+    void output_euler(ftype &roll, ftype &pitch, ftype &yaw) const;
+
+    // output at the current time for the primary-core log (UKFP)
+    void Log_Write_Primary(void) const;
+
+    // restart from another core's state when this core's IMU returns in flight: navigation states, covariance, buffers
+    // and timing are copied; this IMU's gyro and accel biases restart at zero with their initial uncertainty
+    void reset_from(const NavUKF_core &src);
 
     // NIS monitoring: updates of measurement type t (0..3) counted after the settling time, and how many had NIS inside the 95 % bounds
     uint32_t nis_count(uint8_t t) const { return t < NUM_MEAS_TYPES ? _nis_count[t] : 0; }
@@ -45,6 +59,8 @@ public:
 
 private:
     const NavUKF &frontend;
+    const uint8_t imu_index;
+    ftype nis_score;
 
     // nominal state (ukf_state_model.md Section 2) and error-state covariance
     ftype x[UKFMath::NUM_STATES];

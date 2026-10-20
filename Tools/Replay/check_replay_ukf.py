@@ -17,7 +17,7 @@ check UKF shadow estimator output in Replay logs (copy of check_replay.py with t
   with a log written before UKFD existed)
 '''
 
-UKF_LIST = ['UKF1', 'UKF2', 'UKF3', 'UKFN', 'UKFD', 'UKFH', 'UKFM']
+UKF_LIST = ['UKF1', 'UKF2', 'UKF3', 'UKFN', 'UKFD', 'UKFH', 'UKFM', 'UKFP', 'UKFS']
 
 
 def msg_key(m):
@@ -98,15 +98,18 @@ def check_log(logfile, progress=print, verbose=False, accuracy=0.0, ignores=set(
     return failure == 0 and errors == 0
 
 
+ONLY_CORE = None
+
+
 def replayed_ukf(logfile):
-    '''generator of replayed UKF messages (core >= 100) in log order'''
+    '''generator of replayed UKF messages (core >= 100) in log order; with --core only that core'''
     from pymavlink import mavutil
     mlog = mavutil.mavlink_connection(logfile)
     while True:
         m = mlog.recv_match(type=UKF_LIST)
         if m is None:
             return
-        if m.C >= 100:
+        if m.C >= 100 and (ONLY_CORE is None or m.C == 100 + ONLY_CORE):
             yield m
 
 
@@ -155,11 +158,13 @@ if __name__ == '__main__':
     parser.add_argument("--accuracy", type=float, default=0.0, help="accuracy percentage for match")
     parser.add_argument("--ignore-field", action='append', default=[], help="ignore message field when comparing")
     parser.add_argument("--types", default=None, help="comma-separated UKF messages to check (default: all)")
+    parser.add_argument("--core", type=int, default=None, help="--compare only: compare only this UKF core (0..2)")
     parser.add_argument("logs", metavar="LOG", nargs="+")
 
     args = parser.parse_args()
     if args.types:
         UKF_LIST[:] = args.types.split(',')
+    ONLY_CORE = args.core
 
     failed = False
     if args.compare:
